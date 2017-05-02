@@ -1,6 +1,8 @@
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QGridLayout>
 #include <QScrollArea>
+#include <QPushButton>
 #include <QLabel>
 #include "window-basic-adv-audio.hpp"
 #include "window-basic-main.hpp"
@@ -22,26 +24,32 @@ OBSBasicAdvAudio::OBSBasicAdvAudio(QWidget *parent)
 	QWidget *widget;
 	QLabel *label;
 
+	int idx = 0;
 	mainLayout = new QGridLayout;
 	mainLayout->setContentsMargins(0, 0, 0, 0);
 	label = new QLabel(QTStr("Basic.AdvAudio.Name"));
 	label->setAlignment(Qt::AlignHCenter);
-	mainLayout->addWidget(label, 0, 0);
+	mainLayout->addWidget(label, 0, idx++);
 	label = new QLabel(QTStr("Basic.AdvAudio.Volume"));
 	label->setAlignment(Qt::AlignHCenter);
-	mainLayout->addWidget(label, 0, 1);
+	mainLayout->addWidget(label, 0, idx++);
 	label = new QLabel(QTStr("Basic.AdvAudio.Mono"));
 	label->setAlignment(Qt::AlignHCenter);
-	mainLayout->addWidget(label, 0, 2);
+	mainLayout->addWidget(label, 0, idx++);
 	label = new QLabel(QTStr("Basic.AdvAudio.Panning"));
 	label->setAlignment(Qt::AlignHCenter);
-	mainLayout->addWidget(label, 0, 3);
+	mainLayout->addWidget(label, 0, idx++);
 	label = new QLabel(QTStr("Basic.AdvAudio.SyncOffset"));
 	label->setAlignment(Qt::AlignHCenter);
-	mainLayout->addWidget(label, 0, 4);
+	mainLayout->addWidget(label, 0, idx++);
+#if defined(_WIN32) || defined(__APPLE__)
+	label = new QLabel(QTStr("Basic.AdvAudio.Monitoring"));
+	label->setAlignment(Qt::AlignHCenter);
+	mainLayout->addWidget(label, 0, idx++);
+#endif
 	label = new QLabel(QTStr("Basic.AdvAudio.AudioTracks"));
 	label->setAlignment(Qt::AlignHCenter);
-	mainLayout->addWidget(label, 0, 5);
+	mainLayout->addWidget(label, 0, idx++);
 
 	controlArea = new QWidget;
 	controlArea->setLayout(mainLayout);
@@ -59,10 +67,19 @@ OBSBasicAdvAudio::OBSBasicAdvAudio(QWidget *parent)
 	scrollArea->setWidget(widget);
 	scrollArea->setWidgetResizable(true);
 
+	QPushButton *closeButton = new QPushButton(QTStr("Close"));
+
+	QHBoxLayout *buttonLayout = new QHBoxLayout;
+	buttonLayout->addStretch();
+	buttonLayout->addWidget(closeButton);
+
 	vlayout = new QVBoxLayout;
 	vlayout->setContentsMargins(11, 11, 11, 11);
 	vlayout->addWidget(scrollArea);
+	vlayout->addLayout(buttonLayout);
 	setLayout(vlayout);
+
+	connect(closeButton, &QPushButton::clicked, [this] () {close();});
 
 	installEventFilter(CreateShortcutFilter());
 

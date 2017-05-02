@@ -9,6 +9,7 @@ class QLabel;
 class QSpinBox;
 class QCheckBox;
 class QSlider;
+class QComboBox;
 
 class OBSAdvAudioCtrl : public QObject {
 	Q_OBJECT
@@ -27,10 +28,13 @@ private:
 	QPointer<QLabel>       labelL;
 	QPointer<QLabel>       labelR;
 	QPointer<QSpinBox>     syncOffset;
+	QPointer<QComboBox>    monitoringType;
 	QPointer<QCheckBox>    mixer1;
 	QPointer<QCheckBox>    mixer2;
 	QPointer<QCheckBox>    mixer3;
 	QPointer<QCheckBox>    mixer4;
+	QPointer<QCheckBox>    mixer5;
+	QPointer<QCheckBox>    mixer6;
 
 	OBSSignal              volChangedSignal;
 	OBSSignal              syncOffsetSignal;
@@ -58,8 +62,11 @@ public slots:
 	void downmixMonoChanged(bool checked);
 	void panningChanged(int val);
 	void syncOffsetChanged(int milliseconds);
+	void monitoringTypeChanged(int index);
 	void mixer1Changed(bool checked);
 	void mixer2Changed(bool checked);
 	void mixer3Changed(bool checked);
 	void mixer4Changed(bool checked);
+	void mixer5Changed(bool checked);
+	void mixer6Changed(bool checked);
 };

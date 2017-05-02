@@ -22,6 +22,8 @@ OutputTimer::OutputTimer(QWidget *parent)
 		SLOT(StreamingTimerButton()));
 	QObject::connect(ui->outputTimerRecord, SIGNAL(clicked()), this,
 		SLOT(RecordingTimerButton()));
+	QObject::connect(ui->buttonBox->button(QDialogButtonBox::Close),
+		SIGNAL(clicked()), this, SLOT(hide()));
 
 	streamingTimer = new QTimer(this);
 	streamingTimerDisplay = new QTimer(this);
@@ -88,7 +90,7 @@ void OutputTimer::StreamTimerStart()
 
 	streamingTimer->start();
 	streamingTimerDisplay->start(1000);
-	ui->outputTimerStream->setText(tr("Stop"));
+	ui->outputTimerStream->setText(obs_module_text("Stop"));
 
 	UpdateStreamTimerDisplay();
 }
@@ -122,7 +124,7 @@ void OutputTimer::RecordTimerStart()
 
 	recordingTimer->start();
 	recordingTimerDisplay->start(1000);
-	ui->outputTimerRecord->setText(tr("Stop"));
+	ui->outputTimerRecord->setText(obs_module_text("Stop"));
 
 	UpdateRecordTimerDisplay();
 }
@@ -137,7 +139,7 @@ void OutputTimer::StreamTimerStop()
 	if (streamingTimer->isActive())
 		streamingTimer->stop();
 
-	ui->outputTimerStream->setText(tr("Start"));
+	ui->outputTimerStream->setText(obs_module_text("Start"));
 
 	if (streamingTimerDisplay->isActive())
 		streamingTimerDisplay->stop();
@@ -155,7 +157,7 @@ void OutputTimer::RecordTimerStop()
 	if (recordingTimer->isActive())
 		recordingTimer->stop();
 
-	ui->outputTimerRecord->setText(tr("Start"));
+	ui->outputTimerRecord->setText(obs_module_text("Start"));
 
 	if (recordingTimerDisplay->isActive())
 		recordingTimerDisplay->stop();

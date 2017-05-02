@@ -2,9 +2,11 @@
 #include <QGridLayout>
 #include <QLabel>
 #include <QSpinBox>
+#include <QComboBox>
 #include <QCheckBox>
 #include <QSlider>
 #include "qt-wrappers.hpp"
+#include "obs-app.hpp"
 #include "adv-audio-control.hpp"
 
 #ifndef NSEC_PER_MSEC
@@ -30,11 +32,16 @@ OBSAdvAudioCtrl::OBSAdvAudioCtrl(QGridLayout *layout, obs_source_t *source_)
 	volume                         = new QSpinBox();
 	forceMono                      = new QCheckBox();
 	panning                        = new QSlider(Qt::Horizontal);
+#if defined(_WIN32) || defined(__APPLE__)
+	monitoringType                 = new QComboBox();
+#endif
 	syncOffset                     = new QSpinBox();
 	mixer1                         = new QCheckBox();
 	mixer2                         = new QCheckBox();
 	mixer3                         = new QCheckBox();
 	mixer4                         = new QCheckBox();
+	mixer5                         = new QCheckBox();
+	mixer6                         = new QCheckBox();
 
 	volChangedSignal.Connect(handler, "volume", OBSSourceVolumeChanged,
 			this);
@@ -85,6 +92,19 @@ OBSAdvAudioCtrl::OBSAdvAudioCtrl(QGridLayout *layout, obs_source_t *source_)
 	syncOffset->setMaximum(20000);
 	syncOffset->setValue(int(cur_sync / NSEC_PER_MSEC));
 
+	int idx;
+#if defined(_WIN32) || defined(__APPLE__)
+	monitoringType->addItem(QTStr("Basic.AdvAudio.Monitoring.None"),
+			(int)OBS_MONITORING_TYPE_NONE);
+	monitoringType->addItem(QTStr("Basic.AdvAudio.Monitoring.MonitorOnly"),
+			(int)OBS_MONITORING_TYPE_MONITOR_ONLY);
+	monitoringType->addItem(QTStr("Basic.AdvAudio.Monitoring.Both"),
+			(int)OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT);
+	int mt = (int)obs_source_get_monitoring_type(source);
+	idx = monitoringType->findData(mt);
+	monitoringType->setCurrentIndex(idx);
+#endif
+
 	mixer1->setText("1");
 	mixer1->setChecked(mixers & (1<<0));
 	mixer2->setText("2");
@@ -93,6 +113,10 @@ OBSAdvAudioCtrl::OBSAdvAudioCtrl(QGridLayout *layout, obs_source_t *source_)
 	mixer3->setChecked(mixers & (1<<2));
 	mixer4->setText("4");
 	mixer4->setChecked(mixers & (1<<3));
+	mixer5->setText("5");
+	mixer5->setChecked(mixers & (1<<4));
+	mixer6->setText("6");
+	mixer6->setChecked(mixers & (1<<5));
 
 	panningContainer->layout()->addWidget(labelL);
 	panningContainer->layout()->addWidget(panning);
@@ -103,6 +127,8 @@ OBSAdvAudioCtrl::OBSAdvAudioCtrl(QGridLayout *layout, obs_source_t *source_)
 	mixerContainer->layout()->addWidget(mixer2);
 	mixerContainer->layout()->addWidget(mixer3);
 	mixerContainer->layout()->addWidget(mixer4);
+	mixerContainer->layout()->addWidget(mixer5);
+	mixerContainer->layout()->addWidget(mixer6);
 
 	QWidget::connect(volume, SIGNAL(valueChanged(int)),
 			this, SLOT(volumeChanged(int)));
@@ -112,6 +138,10 @@ OBSAdvAudioCtrl::OBSAdvAudioCtrl(QGridLayout *layout, obs_source_t *source_)
 			this, SLOT(panningChanged(int)));
 	QWidget::connect(syncOffset, SIGNAL(valueChanged(int)),
 			this, SLOT(syncOffsetChanged(int)));
+#if defined(_WIN32) || defined(__APPLE__)
+	QWidget::connect(monitoringType, SIGNAL(currentIndexChanged(int)),
+			this, SLOT(monitoringTypeChanged(int)));
+#endif
 	QWidget::connect(mixer1, SIGNAL(clicked(bool)),
 			this, SLOT(mixer1Changed(bool)));
 	QWidget::connect(mixer2, SIGNAL(clicked(bool)),
@@ -120,15 +150,23 @@ OBSAdvAudioCtrl::OBSAdvAudioCtrl(QGridLayout *layout, obs_source_t *source_)
 			this, SLOT(mixer3Changed(bool)));
 	QWidget::connect(mixer4, SIGNAL(clicked(bool)),
 			this, SLOT(mixer4Changed(bool)));
+	QWidget::connect(mixer5, SIGNAL(clicked(bool)),
+			this, SLOT(mixer5Changed(bool)));
+	QWidget::connect(mixer6, SIGNAL(clicked(bool)),
+			this, SLOT(mixer6Changed(bool)));
 
 	int lastRow = layout->rowCount();
 
-	layout->addWidget(nameLabel, lastRow, 0);
-	layout->addWidget(volume, lastRow, 1);
-	layout->addWidget(forceMonoContainer, lastRow, 2);
-	layout->addWidget(panningContainer, lastRow, 3);
-	layout->addWidget(syncOffset, lastRow, 4);
-	layout->addWidget(mixerContainer, lastRow, 5);
+	idx = 0;
+	layout->addWidget(nameLabel, lastRow, idx++);
+	layout->addWidget(volume, lastRow, idx++);
+	layout->addWidget(forceMonoContainer, lastRow, idx++);
+	layout->addWidget(panningContainer, lastRow, idx++);
+	layout->addWidget(syncOffset, lastRow, idx++);
+#if defined(_WIN32) || defined(__APPLE__)
+	layout->addWidget(monitoringType, lastRow, idx++);
+#endif
+	layout->addWidget(mixerContainer, lastRow, idx++);
 	layout->layout()->setAlignment(mixerContainer,
 			Qt::AlignHCenter | Qt::AlignVCenter);
 }
@@ -140,6 +178,9 @@ OBSAdvAudioCtrl::~OBSAdvAudioCtrl()
 	forceMonoContainer->deleteLater();
 	panningContainer->deleteLater();
 	syncOffset->deleteLater();
+#if defined(_WIN32) || defined(__APPLE__)
+	monitoringType->deleteLater();
+#endif
 	mixerContainer->deleteLater();
 }
 
@@ -209,6 +250,8 @@ void OBSAdvAudioCtrl::SourceMixersChanged(uint32_t mixers)
 	setCheckboxState(mixer2, mixers & (1<<1));
 	setCheckboxState(mixer3, mixers & (1<<2));
 	setCheckboxState(mixer4, mixers & (1<<3));
+	setCheckboxState(mixer5, mixers & (1<<4));
+	setCheckboxState(mixer6, mixers & (1<<5));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -250,6 +293,29 @@ void OBSAdvAudioCtrl::syncOffsetChanged(int milliseconds)
 				int64_t(milliseconds) * NSEC_PER_MSEC);
 }
 
+void OBSAdvAudioCtrl::monitoringTypeChanged(int index)
+{
+	int mt = monitoringType->itemData(index).toInt();
+	obs_source_set_monitoring_type(source, (obs_monitoring_type)mt);
+
+	const char *type = nullptr;
+
+	switch (mt) {
+	case OBS_MONITORING_TYPE_NONE:
+		type = "none";
+		break;
+	case OBS_MONITORING_TYPE_MONITOR_ONLY:
+		type = "monitor only";
+		break;
+	case OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT:
+		type = "monitor and output";
+		break;
+	}
+
+	blog(LOG_INFO, "User changed audio monitoring for source '%s' to: %s",
+			obs_source_get_name(source), type);
+}
+
 static inline void setMixer(obs_source_t *source, const int mixerIdx,
 		const bool checked)
 {
@@ -280,4 +346,14 @@ void OBSAdvAudioCtrl::mixer3Changed(bool checked)
 void OBSAdvAudioCtrl::mixer4Changed(bool checked)
 {
 	setMixer(source, 3, checked);
+}
+
+void OBSAdvAudioCtrl::mixer5Changed(bool checked)
+{
+	setMixer(source, 4, checked);
+}
+
+void OBSAdvAudioCtrl::mixer6Changed(bool checked)
+{
+	setMixer(source, 5, checked);
 }

@@ -20,7 +20,7 @@ static struct func_hook present;
 
 struct dxgi_swap_data {
 	IDXGISwapChain *swap;
-	void (*capture)(void*, void*);
+	void (*capture)(void*, void*, bool);
 	void (*free)(void);
 };
 
@@ -38,7 +38,8 @@ static bool setup_dxgi(IDXGISwapChain *swap)
 	 * quite know. */
 	if (_strcmpi(process_name, "iw6sp64_ship.exe") == 0 ||
 	    _strcmpi(process_name, "iw6mp64_ship.exe") == 0 ||
-	    _strcmpi(process_name, "justcause3.exe") == 0) {
+	    _strcmpi(process_name, "justcause3.exe") == 0 ||
+	    _strcmpi(process_name, "theHunterCotW_F.exe") == 0) {
 		ignore_d3d10 = true;
 	}
 
@@ -131,7 +132,7 @@ static HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain *swap,
 		backbuffer = get_dxgi_backbuffer(swap);
 
 		if (!!backbuffer) {
-			data.capture(swap, backbuffer);
+			data.capture(swap, backbuffer, capture_overlay);
 			backbuffer->Release();
 		}
 	}
@@ -155,7 +156,7 @@ static HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain *swap,
 			backbuffer = get_dxgi_backbuffer(swap);
 
 			if (!!backbuffer) {
-				data.capture(swap, backbuffer);
+				data.capture(swap, backbuffer, capture_overlay);
 				backbuffer->Release();
 			}
 		}

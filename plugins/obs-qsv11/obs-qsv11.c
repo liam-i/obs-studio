@@ -635,7 +635,7 @@ static void parse_packet(struct obs_qsv *obsqsv, struct encoder_packet *packet, 
 	//int iType = iFrame ? 0 : (bFrame ? 1 : (pFrame ? 2 : -1));
 	//int64_t interval = obsqsv->params.nbFrames + 1;
 
-	// In case MSDK does't support automatic DecodeTimeStamp, do manual
+	// In case MSDK doesn't support automatic DecodeTimeStamp, do manual
 	// calculation
 	if (g_pts2dtsShift >= 0)
 	{
@@ -686,6 +686,8 @@ static bool obs_qsv_encode(void *data, struct encoder_frame *frame,
 
 	mfxU64 qsvPTS = frame->pts * 90000 / voi->fps_num;
 
+	// FIXME: remove null check from the top of this function
+	// if we actually do expect null frames to complete output.
 	if (frame)
 		ret = qsv_encoder_encode(
 			obsqsv->context,
@@ -701,6 +703,7 @@ static bool obs_qsv_encode(void *data, struct encoder_frame *frame,
 
 	if (ret < 0) {
 		warn("encode failed");
+		LeaveCriticalSection(&g_QsvCs);
 		return false;
 	}
 

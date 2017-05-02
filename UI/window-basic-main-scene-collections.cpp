@@ -222,6 +222,12 @@ void OBSBasic::RefreshSceneCollections()
 	EnumSceneCollections(addCollection);
 
 	ui->actionRemoveSceneCollection->setEnabled(count > 1);
+
+	OBSBasic *main = reinterpret_cast<OBSBasic*>(App()->GetMainWindow());
+	main->OpenSavedProjectors();
+	main->ui->actionPasteFilters->setEnabled(false);
+	main->ui->actionPasteRef->setEnabled(false);
+	main->ui->actionPasteDup->setEnabled(false);
 }
 
 void OBSBasic::on_actionNewSceneCollection_triggered()
@@ -399,7 +405,7 @@ void OBSBasic::on_actionExportSceneCollection_triggered()
 	}
 
 	QString exportFile = QFileDialog::getSaveFileName(
-			0,
+			this,
 			QTStr("Basic.MainMenu.SceneCollection.Export"),
 			home + "/" + currentFile,
 			"JSON Files (*.json)");
