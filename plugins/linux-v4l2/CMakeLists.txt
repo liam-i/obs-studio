@@ -1,48 +1,34 @@
 project(linux-v4l2)
 
-if(DISABLE_V4L2)
-	message(STATUS "v4l2 plugin disabled")
-	return()
+option(ENABLE_V4L2 "Build OBS with v4l2 support" ON)
+if(NOT ENABLE_V4L2)
+  obs_status(DISABLED "linux-v4l2")
+  return()
 endif()
 
-find_package(Libv4l2)
-find_package(LibUDev QUIET)
+option(ENABLE_UDEV "Build linux-v4l2 with UDEV support" ON)
 
-if(NOT LIBV4L2_FOUND AND ENABLE_V4L2)
-	message(FATAL_ERROR "libv4l2 not found bit plugin set as enabled")
-elseif(NOT LIBV4L2_FOUND)
-	message(STATUS "libv4l2 not found, disabling v4l2 plugin")
-	return()
+find_package(Libv4l2 REQUIRED)
+find_package(FFmpeg REQUIRED COMPONENTS avcodec avutil avformat)
+
+add_library(linux-v4l2 MODULE)
+add_library(OBS::v4l2 ALIAS linux-v4l2)
+
+target_sources(linux-v4l2 PRIVATE linux-v4l2.c v4l2-controls.c v4l2-input.c
+                                  v4l2-helpers.c v4l2-output.c v4l2-decoder.c)
+
+target_link_libraries(
+  linux-v4l2 PRIVATE OBS::libobs LIB4L2::LIB4L2 FFmpeg::avcodec
+                     FFmpeg::avformat FFmpeg::avutil)
+
+set_target_properties(linux-v4l2 PROPERTIES FOLDER "plugins")
+
+if(ENABLE_UDEV)
+  find_package(Udev REQUIRED)
+  target_sources(linux-v4l2 PRIVATE v4l2-udev.c)
+
+  target_link_libraries(linux-v4l2 PRIVATE Udev::Udev)
+  target_compile_definitions(linux-v4l2 PRIVATE HAVE_UDEV)
 endif()
 
-if(NOT UDEV_FOUND OR DISABLE_UDEV)
-	message(STATUS "udev disabled for v4l2 plugin")
-else()
-	set(linux-v4l2-udev_SOURCES
-		v4l2-udev.c
-	)
-	add_definitions(-DHAVE_UDEV)
-endif()
-
-include_directories(
-	SYSTEM "${CMAKE_SOURCE_DIR}/libobs"
-	${LIBV4L2_INCLUDE_DIRS}
-)
-
-set(linux-v4l2_SOURCES
-	linux-v4l2.c
-	v4l2-input.c
-	v4l2-helpers.c
-	${linux-v4l2-udev_SOURCES}
-)
-
-add_library(linux-v4l2 MODULE
-	${linux-v4l2_SOURCES}
-)
-target_link_libraries(linux-v4l2
-	libobs
-	${LIBV4L2_LIBRARIES}
-	${UDEV_LIBRARIES}
-)
-
-install_obs_plugin_with_data(linux-v4l2 data)
+setup_plugin_target(linux-v4l2)

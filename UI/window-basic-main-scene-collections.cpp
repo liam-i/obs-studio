@@ -23,21 +23,22 @@
 #include <QStandardPaths>
 #include "item-widget-helpers.hpp"
 #include "window-basic-main.hpp"
+#include "window-importer.hpp"
 #include "window-namedialog.hpp"
 #include "qt-wrappers.hpp"
 
 using namespace std;
 
-void EnumSceneCollections(std::function<bool (const char *, const char *)> &&cb)
+void EnumSceneCollections(std::function<bool(const char *, const char *)> &&cb)
 {
 	char path[512];
 	os_glob_t *glob;
 
 	int ret = GetConfigPath(path, sizeof(path),
-			"obs-studio/basic/scenes/*.json");
+				"obs-studio/basic/scenes/*.json");
 	if (ret <= 0) {
 		blog(LOG_WARNING, "Failed to get config path for scene "
-		                  "collections");
+				  "collections");
 		return;
 	}
 
@@ -52,8 +53,8 @@ void EnumSceneCollections(std::function<bool (const char *, const char *)> &&cb)
 		if (glob->gl_pathv[i].directory)
 			continue;
 
-		obs_data_t *data = obs_data_create_from_json_file_safe(filePath,
-				"bak");
+		OBSDataAutoRelease data =
+			obs_data_create_from_json_file_safe(filePath, "bak");
 		std::string name = obs_data_get_string(data, "name");
 
 		/* if no name found, use the file name as the name
@@ -63,8 +64,6 @@ void EnumSceneCollections(std::function<bool (const char *, const char *)> &&cb)
 			name.resize(name.size() - 5);
 		}
 
-		obs_data_release(data);
-
 		if (!cb(name.c_str(), filePath))
 			break;
 	}
@@ -72,11 +71,10 @@ void EnumSceneCollections(std::function<bool (const char *, const char *)> &&cb)
 	os_globfree(glob);
 }
 
-static bool SceneCollectionExists(const char *findName)
+bool SceneCollectionExists(const char *findName)
 {
 	bool found = false;
-	auto func = [&](const char *name, const char*)
-	{
+	auto func = [&](const char *name, const char *) {
 		if (strcmp(name, findName) == 0) {
 			found = true;
 			return false;
@@ -90,93 +88,93 @@ static bool SceneCollectionExists(const char *findName)
 }
 
 static bool GetSceneCollectionName(QWidget *parent, std::string &name,
-		std::string &file, const char *oldName = nullptr)
+				   std::string &file,
+				   const char *oldName = nullptr)
 {
 	bool rename = oldName != nullptr;
 	const char *title;
 	const char *text;
-	char path[512];
-	size_t len;
-	int ret;
 
 	if (rename) {
 		title = Str("Basic.Main.RenameSceneCollection.Title");
-		text  = Str("Basic.Main.AddSceneCollection.Text");
+		text = Str("Basic.Main.AddSceneCollection.Text");
 	} else {
 		title = Str("Basic.Main.AddSceneCollection.Title");
-		text  = Str("Basic.Main.AddSceneCollection.Text");
+		text = Str("Basic.Main.AddSceneCollection.Text");
 	}
 
 	for (;;) {
-		bool success = NameDialog::AskForName(parent, title, text,
-				name, QT_UTF8(oldName));
+		bool success = NameDialog::AskForName(parent, title, text, name,
+						      QT_UTF8(oldName));
 		if (!success) {
 			return false;
 		}
 		if (name.empty()) {
-			QMessageBox::information(parent,
-					QTStr("NoNameEntered.Title"),
-					QTStr("NoNameEntered.Text"));
+			OBSMessageBox::warning(parent,
+					       QTStr("NoNameEntered.Title"),
+					       QTStr("NoNameEntered.Text"));
 			continue;
 		}
 		if (SceneCollectionExists(name.c_str())) {
-			QMessageBox::information(parent,
-					QTStr("NameExists.Title"),
-					QTStr("NameExists.Text"));
+			OBSMessageBox::warning(parent,
+					       QTStr("NameExists.Title"),
+					       QTStr("NameExists.Text"));
 			continue;
 		}
 		break;
 	}
 
-	if (!GetFileSafeName(name.c_str(), file)) {
-		blog(LOG_WARNING, "Failed to create safe file name for '%s'",
-				name.c_str());
+	if (!GetUnusedSceneCollectionFile(name, file)) {
 		return false;
 	}
 
-	ret = GetConfigPath(path, sizeof(path), "obs-studio/basic/scenes/");
-	if (ret <= 0) {
-		blog(LOG_WARNING, "Failed to get scene collection config path");
-		return false;
-	}
-
-	len = file.size();
-	file.insert(0, path);
-
-	if (!GetClosestUnusedFileName(file, "json")) {
-		blog(LOG_WARNING, "Failed to get closest file name for %s",
-				file.c_str());
-		return false;
-	}
-
-	file.erase(file.size() - 5, 5);
-	file.erase(0, file.size() - len);
 	return true;
 }
 
-void OBSBasic::AddSceneCollection(bool create_new)
+bool OBSBasic::AddSceneCollection(bool create_new, const QString &qname)
 {
 	std::string name;
 	std::string file;
 
-	if (!GetSceneCollectionName(this, name, file))
-		return;
+	if (qname.isEmpty()) {
+		if (!GetSceneCollectionName(this, name, file))
+			return false;
+	} else {
+		name = QT_TO_UTF8(qname);
+		if (SceneCollectionExists(name.c_str()))
+			return false;
 
-	SaveProjectNow();
-
-	config_set_string(App()->GlobalConfig(), "Basic", "SceneCollection",
-			name.c_str());
-	config_set_string(App()->GlobalConfig(), "Basic", "SceneCollectionFile",
-			file.c_str());
-	if (create_new) {
-		CreateDefaultScene(false);
+		if (!GetUnusedSceneCollectionFile(name, file)) {
+			return false;
+		}
 	}
-	SaveProjectNow();
-	RefreshSceneCollections();
+
+	auto new_collection = [this, create_new](const std::string &file,
+						 const std::string &name) {
+		SaveProjectNow();
+
+		config_set_string(App()->GlobalConfig(), "Basic",
+				  "SceneCollection", name.c_str());
+		config_set_string(App()->GlobalConfig(), "Basic",
+				  "SceneCollectionFile", file.c_str());
+
+		if (create_new) {
+			CreateDefaultScene(false);
+		} else {
+			obs_reset_source_uuids();
+		}
+
+		SaveProjectNow();
+		RefreshSceneCollections();
+	};
+
+	if (api)
+		api->on_event(OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING);
+
+	new_collection(file, name);
 
 	blog(LOG_INFO, "Added scene collection '%s' (%s, %s.json)",
-			name.c_str(), create_new ? "clean" : "duplicate",
-			file.c_str());
+	     name.c_str(), create_new ? "clean" : "duplicate", file.c_str());
 	blog(LOG_INFO, "------------------------------------------------");
 
 	UpdateTitleBar();
@@ -185,11 +183,13 @@ void OBSBasic::AddSceneCollection(bool create_new)
 		api->on_event(OBS_FRONTEND_EVENT_SCENE_COLLECTION_LIST_CHANGED);
 		api->on_event(OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED);
 	}
+
+	return true;
 }
 
 void OBSBasic::RefreshSceneCollections()
 {
-	QList<QAction*> menuActions = ui->sceneCollectionMenu->actions();
+	QList<QAction *> menuActions = ui->sceneCollectionMenu->actions();
 	int count = 0;
 
 	for (int i = 0; i < menuActions.count(); i++) {
@@ -198,18 +198,17 @@ void OBSBasic::RefreshSceneCollections()
 			delete menuActions[i];
 	}
 
-	const char *cur_name = config_get_string(App()->GlobalConfig(),
-			"Basic", "SceneCollection");
+	const char *cur_name = config_get_string(App()->GlobalConfig(), "Basic",
+						 "SceneCollection");
 
-	auto addCollection = [&](const char *name, const char *path)
-	{
+	auto addCollection = [&](const char *name, const char *path) {
 		std::string file = strrchr(path, '/') + 1;
 		file.erase(file.size() - 5, 5);
 
 		QAction *action = new QAction(QT_UTF8(name), this);
 		action->setProperty("file_name", QT_UTF8(path));
-		connect(action, &QAction::triggered,
-				this, &OBSBasic::ChangeSceneCollection);
+		connect(action, &QAction::triggered, this,
+			&OBSBasic::ChangeSceneCollection);
 		action->setCheckable(true);
 
 		action->setChecked(strcmp(name, cur_name) == 0);
@@ -221,10 +220,22 @@ void OBSBasic::RefreshSceneCollections()
 
 	EnumSceneCollections(addCollection);
 
+	/* force saving of first scene collection on first run, otherwise
+	 * no scene collections will show up */
+	if (!count) {
+		long prevDisableVal = disableSaving;
+
+		disableSaving = 0;
+		SaveProjectNow();
+		disableSaving = prevDisableVal;
+
+		EnumSceneCollections(addCollection);
+	}
+
 	ui->actionRemoveSceneCollection->setEnabled(count > 1);
 
-	OBSBasic *main = reinterpret_cast<OBSBasic*>(App()->GetMainWindow());
-	main->OpenSavedProjectors();
+	OBSBasic *main = reinterpret_cast<OBSBasic *>(App()->GetMainWindow());
+
 	main->ui->actionPasteFilters->setEnabled(false);
 	main->ui->actionPasteRef->setEnabled(false);
 	main->ui->actionPasteDup->setEnabled(false);
@@ -244,20 +255,22 @@ void OBSBasic::on_actionRenameSceneCollection_triggered()
 {
 	std::string name;
 	std::string file;
+	std::string oname;
 
-	std::string oldFile = config_get_string(App()->GlobalConfig(),
-			"Basic", "SceneCollectionFile");
-	const char *oldName = config_get_string(App()->GlobalConfig(),
-			"Basic", "SceneCollection");
+	std::string oldFile = config_get_string(App()->GlobalConfig(), "Basic",
+						"SceneCollectionFile");
+	const char *oldName = config_get_string(App()->GlobalConfig(), "Basic",
+						"SceneCollection");
+	oname = std::string(oldName);
 
 	bool success = GetSceneCollectionName(this, name, file, oldName);
 	if (!success)
 		return;
 
 	config_set_string(App()->GlobalConfig(), "Basic", "SceneCollection",
-			name.c_str());
+			  name.c_str());
 	config_set_string(App()->GlobalConfig(), "Basic", "SceneCollectionFile",
-			file.c_str());
+			  file.c_str());
 	SaveProjectNow();
 
 	char path[512];
@@ -275,16 +288,14 @@ void OBSBasic::on_actionRenameSceneCollection_triggered()
 
 	blog(LOG_INFO, "------------------------------------------------");
 	blog(LOG_INFO, "Renamed scene collection to '%s' (%s.json)",
-			name.c_str(), file.c_str());
+	     name.c_str(), file.c_str());
 	blog(LOG_INFO, "------------------------------------------------");
 
 	UpdateTitleBar();
 	RefreshSceneCollections();
 
-	if (api) {
-		api->on_event(OBS_FRONTEND_EVENT_SCENE_COLLECTION_LIST_CHANGED);
-		api->on_event(OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED);
-	}
+	if (api)
+		api->on_event(OBS_FRONTEND_EVENT_SCENE_COLLECTION_RENAMED);
 }
 
 void OBSBasic::on_actionRemoveSceneCollection_triggered()
@@ -292,13 +303,12 @@ void OBSBasic::on_actionRemoveSceneCollection_triggered()
 	std::string newName;
 	std::string newPath;
 
-	std::string oldFile = config_get_string(App()->GlobalConfig(),
-			"Basic", "SceneCollectionFile");
-	std::string oldName = config_get_string(App()->GlobalConfig(),
-			"Basic", "SceneCollection");
+	std::string oldFile = config_get_string(App()->GlobalConfig(), "Basic",
+						"SceneCollectionFile");
+	std::string oldName = config_get_string(App()->GlobalConfig(), "Basic",
+						"SceneCollection");
 
-	auto cb = [&](const char *name, const char *filePath)
-	{
+	auto cb = [&](const char *name, const char *filePath) {
 		if (strcmp(oldName.c_str(), name) != 0) {
 			newName = name;
 			newPath = filePath;
@@ -314,11 +324,11 @@ void OBSBasic::on_actionRemoveSceneCollection_triggered()
 	if (newPath.empty())
 		return;
 
-	QString text = QTStr("ConfirmRemove.Text");
-	text.replace("$1", QT_UTF8(oldName.c_str()));
+	QString text =
+		QTStr("ConfirmRemove.Text").arg(QT_UTF8(oldName.c_str()));
 
-	QMessageBox::StandardButton button = QMessageBox::question(this,
-			QTStr("ConfirmRemove.Title"), text);
+	QMessageBox::StandardButton button = OBSMessageBox::question(
+		this, QTStr("ConfirmRemove.Title"), text);
 	if (button == QMessageBox::No)
 		return;
 
@@ -329,8 +339,12 @@ void OBSBasic::on_actionRemoveSceneCollection_triggered()
 		return;
 	}
 
+	if (api)
+		api->on_event(OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING);
+
 	oldFile.insert(0, path);
 	oldFile += ".json";
+
 	os_unlink(oldFile.c_str());
 	oldFile += ".bak";
 	os_unlink(oldFile.c_str());
@@ -338,13 +352,13 @@ void OBSBasic::on_actionRemoveSceneCollection_triggered()
 	Load(newPath.c_str());
 	RefreshSceneCollections();
 
-	const char *newFile = config_get_string(App()->GlobalConfig(),
-			"Basic", "SceneCollectionFile");
+	const char *newFile = config_get_string(App()->GlobalConfig(), "Basic",
+						"SceneCollectionFile");
 
-	blog(LOG_INFO, "Removed scene collection '%s' (%s.json), "
-			"switched to '%s' (%s.json)",
-			oldName.c_str(), oldFile.c_str(),
-			newName.c_str(), newFile);
+	blog(LOG_INFO,
+	     "Removed scene collection '%s' (%s.json), "
+	     "switched to '%s' (%s.json)",
+	     oldName.c_str(), oldFile.c_str(), newName.c_str(), newFile);
 	blog(LOG_INFO, "------------------------------------------------");
 
 	UpdateTitleBar();
@@ -357,46 +371,22 @@ void OBSBasic::on_actionRemoveSceneCollection_triggered()
 
 void OBSBasic::on_actionImportSceneCollection_triggered()
 {
-	char path[512];
+	OBSImporter imp(this);
+	imp.exec();
 
-	QString home = QDir::homePath();
-
-	int ret = GetConfigPath(path, 512, "obs-studio/basic/scenes/");
-	if (ret <= 0) {
-		blog(LOG_WARNING, "Failed to get scene collection config path");
-		return;
-	}
-
-	QString file = QFileDialog::getOpenFileName(
-			this,
-			QTStr("Basic.MainMenu.SceneCollection.Import"),
-			home,
-			"JSON Files (*.json)");
-
-	QFileInfo finfo(file);
-	QString filename = finfo.fileName();
-	QFileInfo destinfo(path + filename);
-
-	if (!file.isEmpty() && !file.isNull()) {
-		 if (!destinfo.exists()) {
-			QFile::copy(file, path + filename);
-			RefreshSceneCollections();
-		} else {
-			QMessageBox::information(this,
-				QTStr("Basic.MainMenu.SceneCollection.Import"),
-				QTStr("Basic.MainMenu.SceneCollection.Exists"));
-		}
-	}
+	RefreshSceneCollections();
 }
 
 void OBSBasic::on_actionExportSceneCollection_triggered()
 {
+	SaveProjectNow();
+
 	char path[512];
 
 	QString home = QDir::homePath();
 
-	QString currentFile = QT_UTF8(config_get_string(App()->GlobalConfig(),
-				"Basic", "SceneCollectionFile"));
+	QString currentFile = QT_UTF8(config_get_string(
+		App()->GlobalConfig(), "Basic", "SceneCollectionFile"));
 
 	int ret = GetConfigPath(path, 512, "obs-studio/basic/scenes/");
 	if (ret <= 0) {
@@ -404,21 +394,59 @@ void OBSBasic::on_actionExportSceneCollection_triggered()
 		return;
 	}
 
-	QString exportFile = QFileDialog::getSaveFileName(
-			this,
-			QTStr("Basic.MainMenu.SceneCollection.Export"),
-			home + "/" + currentFile,
-			"JSON Files (*.json)");
+	QString exportFile =
+		SaveFile(this, QTStr("Basic.MainMenu.SceneCollection.Export"),
+			 home + "/" + currentFile, "JSON Files (*.json)");
 
 	string file = QT_TO_UTF8(exportFile);
 
-	if (!exportFile.isEmpty() && !exportFile.isNull())
-		QFile::copy(path + currentFile + ".json", exportFile);
+	if (!exportFile.isEmpty() && !exportFile.isNull()) {
+		QString inputFile = path + currentFile + ".json";
+
+		OBSDataAutoRelease collection =
+			obs_data_create_from_json_file(QT_TO_UTF8(inputFile));
+
+		OBSDataArrayAutoRelease sources =
+			obs_data_get_array(collection, "sources");
+		if (!sources) {
+			blog(LOG_WARNING,
+			     "No sources in exported scene collection");
+			return;
+		}
+		obs_data_erase(collection, "sources");
+
+		// We're just using std::sort on a vector to make life easier.
+		vector<OBSData> sourceItems;
+		obs_data_array_enum(
+			sources,
+			[](obs_data_t *data, void *pVec) -> void {
+				auto &sourceItems =
+					*static_cast<vector<OBSData> *>(pVec);
+				sourceItems.push_back(data);
+			},
+			&sourceItems);
+
+		std::sort(sourceItems.begin(), sourceItems.end(),
+			  [](const OBSData &a, const OBSData &b) {
+				  return astrcmpi(obs_data_get_string(a,
+								      "name"),
+						  obs_data_get_string(
+							  b, "name")) < 0;
+			  });
+
+		OBSDataArrayAutoRelease newSources = obs_data_array_create();
+		for (auto &item : sourceItems)
+			obs_data_array_push_back(newSources, item);
+
+		obs_data_set_array(collection, "sources", newSources);
+		obs_data_save_json_pretty_safe(
+			collection, QT_TO_UTF8(exportFile), "tmp", "bak");
+	}
 }
 
 void OBSBasic::ChangeSceneCollection()
 {
-	QAction *action = reinterpret_cast<QAction*>(sender());
+	QAction *action = reinterpret_cast<QAction *>(sender());
 	std::string fileName;
 
 	if (!action)
@@ -428,25 +456,29 @@ void OBSBasic::ChangeSceneCollection()
 	if (fileName.empty())
 		return;
 
-	const char *oldName = config_get_string(App()->GlobalConfig(),
-			"Basic", "SceneCollection");
+	const char *oldName = config_get_string(App()->GlobalConfig(), "Basic",
+						"SceneCollection");
+
 	if (action->text().compare(QT_UTF8(oldName)) == 0) {
 		action->setChecked(true);
 		return;
 	}
+
+	if (api)
+		api->on_event(OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING);
 
 	SaveProjectNow();
 
 	Load(fileName.c_str());
 	RefreshSceneCollections();
 
-	const char *newName = config_get_string(App()->GlobalConfig(),
-			"Basic", "SceneCollection");
-	const char *newFile = config_get_string(App()->GlobalConfig(),
-			"Basic", "SceneCollectionFile");
+	const char *newName = config_get_string(App()->GlobalConfig(), "Basic",
+						"SceneCollection");
+	const char *newFile = config_get_string(App()->GlobalConfig(), "Basic",
+						"SceneCollectionFile");
 
-	blog(LOG_INFO, "Switched to scene collection '%s' (%s.json)",
-			newName, newFile);
+	blog(LOG_INFO, "Switched to scene collection '%s' (%s.json)", newName,
+	     newFile);
 	blog(LOG_INFO, "------------------------------------------------");
 
 	UpdateTitleBar();

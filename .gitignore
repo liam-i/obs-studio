@@ -16,13 +16,20 @@
 /debug32/
 /debug64/
 /builds/
+.vs/
 *.o.d
 *.ninja
 .ninja*
 .dirstamp
+/cmake/.CMakeBuildNumber
 
 #xcode
 *.xcodeproj/
+/xcodebuild/
+
+#clion
+.idea/
+cmake-build-debug/
 
 #other stuff (windows stuff, qt moc stuff, etc)
 Release_MD/
@@ -32,6 +39,10 @@ x64/
 ipch/
 GeneratedFiles/
 .moc/
+/UI/obs.rc
+.vscode/
+/CI/include/*.lock.json
+install_temp/
 
 /other/
 
@@ -42,10 +53,17 @@ install-sh
 Makefile.in
 Makefile
 
+#python
+__pycache__
+
+#sphinx
+/docs/sphinx/_build/*
+!/docs/sphinx/_build/.gitignore
+!/docs/sphinx/Makefile
+
 #random useless file stuff
 *.dmg
 *.app
-.DS_Store
 .directory
 .hg
 .depend
@@ -75,7 +93,6 @@ tags
 *.obj
 *.pdb
 *.res
-*.manifest
 *.dep
 *.zip
 *.lnk
@@ -84,3 +101,10 @@ tags
 .DS_Store
 */.DS_Store
 */**/.DS_Store
+
+#flatpak
+/.flatpak-builder/
+/_flatpak_build/
+/flatpak_app/
+/repo/
+/CI/flatpak/flatpak-github-action-modified-*

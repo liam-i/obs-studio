@@ -6,6 +6,7 @@
 #include "ui_OBSBasicTransform.h"
 
 class OBSBasic;
+class QListWidgetItem;
 
 class OBSBasicTransform : public QDialog {
 	Q_OBJECT
@@ -13,16 +14,18 @@ class OBSBasicTransform : public QDialog {
 private:
 	std::unique_ptr<Ui::OBSBasicTransform> ui;
 
-	OBSBasic     *main;
+	OBSBasic *main;
 	OBSSceneItem item;
-	OBSSignal    channelChangedSignal;
-	OBSSignal    transformSignal;
-	OBSSignal    removeSignal;
-	OBSSignal    selectSignal;
-	OBSSignal    deselectSignal;
+	OBSSignal channelChangedSignal;
+	OBSSignal transformSignal;
+	OBSSignal removeSignal;
+	OBSSignal selectSignal;
+	OBSSignal deselectSignal;
 
-	bool         ignoreTransformSignal = false;
-	bool         ignoreItemChange      = false;
+	std::string undo_data;
+
+	bool ignoreTransformSignal = false;
+	bool ignoreItemChange = false;
 
 	void HookWidget(QWidget *widget, const char *signal, const char *slot);
 
@@ -42,8 +45,11 @@ private slots:
 	void OnBoundsType(int index);
 	void OnControlChanged();
 	void OnCropChanged();
-	void on_resetButton_clicked();
 
 public:
-	OBSBasicTransform(OBSBasic *parent);
+	OBSBasicTransform(OBSSceneItem item, OBSBasic *parent);
+	~OBSBasicTransform();
+
+public slots:
+	void OnSceneChanged(QListWidgetItem *current, QListWidgetItem *prev);
 };

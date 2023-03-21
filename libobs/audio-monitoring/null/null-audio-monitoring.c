@@ -1,4 +1,9 @@
-#include "../../obs-internal.h"
+#include <obs-internal.h>
+
+bool obs_audio_monitoring_available(void)
+{
+	return false;
+}
 
 void obs_enum_audio_monitoring_devices(obs_enum_audio_device_cb cb, void *data)
 {

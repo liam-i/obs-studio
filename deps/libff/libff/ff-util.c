@@ -16,10 +16,20 @@
 
 #include "ff-util.h"
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4244)
+#pragma warning(disable : 4204)
+#endif
+
 #include <libavcodec/avcodec.h>
 #include <libavdevice/avdevice.h>
 #include <libavformat/avformat.h>
 #include <libavutil/log.h>
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 #include <stdbool.h>
 
@@ -30,7 +40,7 @@ struct ff_format_desc {
 	const char *extensions;
 	enum AVCodecID audio_codec;
 	enum AVCodecID video_codec;
-	const struct AVCodecTag * const *codec_tags;
+	const struct AVCodecTag *const *codec_tags;
 	const struct ff_format_desc *next;
 };
 
@@ -46,40 +56,44 @@ struct ff_codec_desc {
 
 void ff_init()
 {
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 9, 100)
 	av_register_all();
 	//avdevice_register_all();
 	avcodec_register_all();
+#endif
 	avformat_network_init();
 }
 
 const char *ff_codec_name_from_id(int codec_id)
 {
-	AVCodec *codec = avcodec_find_encoder(codec_id);
+	const AVCodec *codec = avcodec_find_encoder(codec_id);
 	if (codec != NULL)
 		return codec->name;
 	else
 		return NULL;
 }
 
-static bool get_codecs(const AVCodecDescriptor*** descs, unsigned int *size)
+static bool get_codecs(const AVCodecDescriptor ***descs, unsigned int *size)
 {
 	const AVCodecDescriptor *desc = NULL;
 	const AVCodecDescriptor **codecs;
 	unsigned int codec_count = 0;
 	unsigned int i = 0;
 
-	while ((desc = avcodec_descriptor_next(desc)))
+	while ((desc = avcodec_descriptor_next(desc)) != NULL)
 		codec_count++;
 
 	codecs = av_calloc(codec_count, sizeof(AVCodecDescriptor *));
 
 	if (codecs == NULL) {
-		av_log(NULL, AV_LOG_ERROR, "unable to allocate sorted codec "
-				"array with size %d", codec_count);
+		av_log(NULL, AV_LOG_ERROR,
+		       "unable to allocate sorted codec "
+		       "array with size %d",
+		       codec_count);
 		return false;
 	}
 
-	while ((desc = avcodec_descriptor_next(desc)))
+	while ((desc = avcodec_descriptor_next(desc)) != NULL)
 		codecs[i++] = desc;
 
 	*size = codec_count;
@@ -89,18 +103,37 @@ static bool get_codecs(const AVCodecDescriptor*** descs, unsigned int *size)
 
 static const AVCodec *next_codec_for_id(enum AVCodecID id, const AVCodec *prev)
 {
-    while ((prev = av_codec_next(prev))) {
-        if (prev->id == id && av_codec_is_encoder(prev))
-            return prev;
-    }
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(58, 9, 100)
+	const AVCodec *cur = NULL;
+	void *i = 0;
+	bool found_prev = false;
 
-    return NULL;
+	while ((cur = av_codec_iterate(&i)) != NULL) {
+		if (cur->id == id && av_codec_is_encoder(cur)) {
+			if (!prev) {
+				return cur;
+			} else if (!found_prev) {
+				if (cur == prev) {
+					found_prev = true;
+				}
+			} else {
+				return cur;
+			}
+		}
+	}
+#else
+	while ((prev = av_codec_next(prev)) != NULL) {
+		if (prev->id == id && av_codec_is_encoder(prev))
+			return prev;
+	}
+#endif
+	return NULL;
 }
 
 static void add_codec_to_list(const struct ff_format_desc *format_desc,
-		struct ff_codec_desc **first, struct ff_codec_desc **current,
-		enum AVCodecID id, const AVCodec *codec,
-		bool ignore_compatability)
+                              struct ff_codec_desc **first,
+                              struct ff_codec_desc **current, enum AVCodecID id,
+                              const AVCodec *codec, bool ignore_compatability)
 {
 	if (codec == NULL)
 		codec = avcodec_find_encoder(id);
@@ -115,8 +148,8 @@ static void add_codec_to_list(const struct ff_format_desc *format_desc,
 
 	if (!ignore_compatability) {
 		// Format doesn't support this codec
-		unsigned int tag = av_codec_get_tag(format_desc->codec_tags,
-				codec->id);
+		unsigned int tag =
+		        av_codec_get_tag(format_desc->codec_tags, codec->id);
 		if (tag == 0)
 			return;
 	}
@@ -126,7 +159,7 @@ static void add_codec_to_list(const struct ff_format_desc *format_desc,
 	d->name = codec->name;
 	d->long_name = codec->long_name;
 	d->id = codec->id;
-	AVCodec *base_codec = avcodec_find_encoder(codec->id);
+	const AVCodec *base_codec = avcodec_find_encoder(codec->id);
 	if (strcmp(base_codec->name, codec->name) != 0) {
 		d->alias = true;
 		d->base_name = base_codec->name;
@@ -152,18 +185,19 @@ static void add_codec_to_list(const struct ff_format_desc *format_desc,
 }
 
 static void get_codecs_for_id(const struct ff_format_desc *format_desc,
-		struct ff_codec_desc **first, struct ff_codec_desc **current,
-		enum AVCodecID id, bool ignore_compatability)
+                              struct ff_codec_desc **first,
+                              struct ff_codec_desc **current, enum AVCodecID id,
+                              bool ignore_compatability)
 {
 	const AVCodec *codec = NULL;
-	while ((codec = next_codec_for_id(id, codec)))
-		add_codec_to_list(format_desc, first, current, codec->id,
-				codec, ignore_compatability);
+	while ((codec = next_codec_for_id(id, codec)) != NULL)
+		add_codec_to_list(format_desc, first, current, codec->id, codec,
+		                  ignore_compatability);
 }
 
-const struct ff_codec_desc *ff_codec_supported(
-		const struct ff_format_desc *format_desc,
-		bool ignore_compatability)
+const struct ff_codec_desc *
+ff_codec_supported(const struct ff_format_desc *format_desc,
+                   bool ignore_compatability)
 {
 	const AVCodecDescriptor **codecs;
 	unsigned int size;
@@ -174,10 +208,10 @@ const struct ff_codec_desc *ff_codec_supported(
 	if (!get_codecs(&codecs, &size))
 		return NULL;
 
-	for(i = 0; i < size; i++) {
+	for (i = 0; i < size; i++) {
 		const AVCodecDescriptor *codec = codecs[i];
 		get_codecs_for_id(format_desc, &first, &current, codec->id,
-				ignore_compatability);
+		                  ignore_compatability);
 	}
 
 	av_free((void *)codecs);
@@ -225,8 +259,8 @@ enum ff_codec_type ff_codec_desc_type(const struct ff_codec_desc *codec_desc)
 		return FF_CODEC_UNKNOWN;
 }
 
-const struct ff_codec_desc *ff_codec_desc_next(
-		const struct ff_codec_desc *codec_desc)
+const struct ff_codec_desc *
+ff_codec_desc_next(const struct ff_codec_desc *codec_desc)
 {
 	if (codec_desc != NULL)
 		return codec_desc->next;
@@ -245,7 +279,7 @@ int ff_codec_desc_id(const struct ff_codec_desc *codec_desc)
 void ff_codec_desc_free(const struct ff_codec_desc *codec_desc)
 {
 	const struct ff_codec_desc *desc = codec_desc;
-	while(desc != NULL) {
+	while (desc != NULL) {
 		const struct ff_codec_desc *next = desc->next;
 		av_free((void *)desc);
 		desc = next;
@@ -257,7 +291,6 @@ static inline bool is_output_device(const AVClass *avclass)
 	if (!avclass)
 		return 0;
 
-#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(52, 66, 101)
 	switch (avclass->category) {
 	case AV_CLASS_CATEGORY_DEVICE_VIDEO_OUTPUT:
 	case AV_CLASS_CATEGORY_DEVICE_AUDIO_OUTPUT:
@@ -266,18 +299,21 @@ static inline bool is_output_device(const AVClass *avclass)
 	default:
 		return false;
 	}
-#else
-	return (avclass->category == AV_CLASS_CATEGORY_OUTPUT);
-#endif
 }
 
 const struct ff_format_desc *ff_format_supported()
 {
-	AVOutputFormat *output_format = NULL;
+	const AVOutputFormat *output_format = NULL;
 	struct ff_format_desc *desc = NULL;
 	struct ff_format_desc *current = NULL;
 
-	while ((output_format = av_oformat_next(output_format))) {
+#if LIBAVFORMAT_VERSION_INT >= AV_VERSION_INT(58, 9, 100)
+	void *i = 0;
+
+	while ((output_format = av_muxer_iterate(&i)) != NULL) {
+#else
+	while ((output_format = av_oformat_next(output_format)) != NULL) {
+#endif
 		struct ff_format_desc *d;
 		if (is_output_device(output_format->priv_class))
 			continue;
@@ -367,8 +403,8 @@ int ff_format_desc_video(const struct ff_format_desc *format_desc)
 		return false;
 }
 
-const struct ff_format_desc *ff_format_desc_next(
-		const struct ff_format_desc *format_desc)
+const struct ff_format_desc *
+ff_format_desc_next(const struct ff_format_desc *format_desc)
 {
 	if (format_desc != NULL)
 		return format_desc->next;
@@ -377,9 +413,9 @@ const struct ff_format_desc *ff_format_desc_next(
 }
 
 static const char *get_encoder_name(const struct ff_format_desc *format_desc,
-		enum AVCodecID codec_id)
+                                    enum AVCodecID codec_id)
 {
-	AVCodec *codec = avcodec_find_encoder(codec_id);
+	const AVCodec *codec = avcodec_find_encoder(codec_id);
 	if (codec == NULL && codec_id == AV_CODEC_ID_NONE)
 		return NULL;
 	else if (codec == NULL)
@@ -388,27 +424,24 @@ static const char *get_encoder_name(const struct ff_format_desc *format_desc,
 		return codec->name;
 }
 
-const char *ff_format_desc_get_default_name(
-		const struct ff_format_desc *format_desc,
-		enum ff_codec_type codec_type)
+const char *
+ff_format_desc_get_default_name(const struct ff_format_desc *format_desc,
+                                enum ff_codec_type codec_type)
 {
-	switch (codec_type)
-	{
-		case FF_CODEC_AUDIO:
-			return get_encoder_name(format_desc,
-					format_desc->audio_codec);
-		case FF_CODEC_VIDEO:
-			return get_encoder_name(format_desc,
-					format_desc->video_codec);
-		default:
-			return NULL;
+	switch (codec_type) {
+	case FF_CODEC_AUDIO:
+		return get_encoder_name(format_desc, format_desc->audio_codec);
+	case FF_CODEC_VIDEO:
+		return get_encoder_name(format_desc, format_desc->video_codec);
+	default:
+		return NULL;
 	}
 }
 
 void ff_format_desc_free(const struct ff_format_desc *format_desc)
 {
 	const struct ff_format_desc *desc = format_desc;
-	while(desc != NULL) {
+	while (desc != NULL) {
 		const struct ff_format_desc *next = desc->next;
 		av_free((void *)desc);
 		desc = next;

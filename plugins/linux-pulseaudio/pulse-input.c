@@ -17,11 +17,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include <util/platform.h>
 #include <util/bmem.h>
+#include <util/util_uint64.h>
 #include <obs-module.h>
 
 #include "pulse-wrapper.h"
 
-#define NSEC_PER_SEC  1000000000LL
+#define NSEC_PER_SEC 1000000000LL
 #define NSEC_PER_MSEC 1000000L
 
 #define PULSE_DATA(voidptr) struct pulse_data *data = voidptr;
@@ -33,6 +34,8 @@ struct pulse_data {
 
 	/* user settings */
 	char *device;
+	bool is_default;
+	bool input;
 
 	/* server info */
 	enum speaker_layout speakers;
@@ -52,15 +55,19 @@ static void pulse_stop_recording(struct pulse_data *data);
 /**
  * get obs from pulse audio format
  */
-static enum audio_format pulse_to_obs_audio_format(
-	pa_sample_format_t format)
+static enum audio_format pulse_to_obs_audio_format(pa_sample_format_t format)
 {
 	switch (format) {
-	case PA_SAMPLE_U8:        return AUDIO_FORMAT_U8BIT;
-	case PA_SAMPLE_S16LE:     return AUDIO_FORMAT_16BIT;
-	case PA_SAMPLE_S32LE:     return AUDIO_FORMAT_32BIT;
-	case PA_SAMPLE_FLOAT32LE: return AUDIO_FORMAT_FLOAT;
-	default:                  return AUDIO_FORMAT_UNKNOWN;
+	case PA_SAMPLE_U8:
+		return AUDIO_FORMAT_U8BIT;
+	case PA_SAMPLE_S16LE:
+		return AUDIO_FORMAT_16BIT;
+	case PA_SAMPLE_S32LE:
+		return AUDIO_FORMAT_32BIT;
+	case PA_SAMPLE_FLOAT32LE:
+		return AUDIO_FORMAT_FLOAT;
+	default:
+		return AUDIO_FORMAT_UNKNOWN;
 	}
 
 	return AUDIO_FORMAT_UNKNOWN;
@@ -76,25 +83,87 @@ static enum audio_format pulse_to_obs_audio_format(
  * @note This *might* not work for some rather unusual setups, but should work
  *       fine for the majority of cases.
  */
-static enum speaker_layout pulse_channels_to_obs_speakers(
-	uint_fast32_t channels)
+static enum speaker_layout
+pulse_channels_to_obs_speakers(uint_fast32_t channels)
 {
-	switch(channels) {
-	case 1: return SPEAKERS_MONO;
-	case 2: return SPEAKERS_STEREO;
-	case 3: return SPEAKERS_2POINT1;
-	case 4: return SPEAKERS_SURROUND;
-	case 5: return SPEAKERS_4POINT1;
-	case 6: return SPEAKERS_5POINT1;
-	case 8: return SPEAKERS_7POINT1;
+	switch (channels) {
+	case 1:
+		return SPEAKERS_MONO;
+	case 2:
+		return SPEAKERS_STEREO;
+	case 3:
+		return SPEAKERS_2POINT1;
+	case 4:
+		return SPEAKERS_4POINT0;
+	case 5:
+		return SPEAKERS_4POINT1;
+	case 6:
+		return SPEAKERS_5POINT1;
+	case 8:
+		return SPEAKERS_7POINT1;
 	}
 
 	return SPEAKERS_UNKNOWN;
 }
 
+static pa_channel_map pulse_channel_map(enum speaker_layout layout)
+{
+	pa_channel_map ret;
+
+	ret.map[0] = PA_CHANNEL_POSITION_FRONT_LEFT;
+	ret.map[1] = PA_CHANNEL_POSITION_FRONT_RIGHT;
+	ret.map[2] = PA_CHANNEL_POSITION_FRONT_CENTER;
+	ret.map[3] = PA_CHANNEL_POSITION_LFE;
+	ret.map[4] = PA_CHANNEL_POSITION_REAR_LEFT;
+	ret.map[5] = PA_CHANNEL_POSITION_REAR_RIGHT;
+	ret.map[6] = PA_CHANNEL_POSITION_SIDE_LEFT;
+	ret.map[7] = PA_CHANNEL_POSITION_SIDE_RIGHT;
+
+	switch (layout) {
+	case SPEAKERS_MONO:
+		ret.channels = 1;
+		ret.map[0] = PA_CHANNEL_POSITION_MONO;
+		break;
+
+	case SPEAKERS_STEREO:
+		ret.channels = 2;
+		break;
+
+	case SPEAKERS_2POINT1:
+		ret.channels = 3;
+		ret.map[2] = PA_CHANNEL_POSITION_LFE;
+		break;
+
+	case SPEAKERS_4POINT0:
+		ret.channels = 4;
+		ret.map[3] = PA_CHANNEL_POSITION_REAR_CENTER;
+		break;
+
+	case SPEAKERS_4POINT1:
+		ret.channels = 5;
+		ret.map[4] = PA_CHANNEL_POSITION_REAR_CENTER;
+		break;
+
+	case SPEAKERS_5POINT1:
+		ret.channels = 6;
+		break;
+
+	case SPEAKERS_7POINT1:
+		ret.channels = 8;
+		break;
+
+	case SPEAKERS_UNKNOWN:
+	default:
+		ret.channels = 0;
+		break;
+	}
+
+	return ret;
+}
+
 static inline uint64_t samples_to_ns(size_t frames, uint_fast32_t rate)
 {
-	return frames * NSEC_PER_SEC / rate;
+	return util_mul_div64(frames, NSEC_PER_SEC, rate);
 }
 
 static inline uint64_t get_sample_time(size_t frames, uint_fast32_t rate)
@@ -129,19 +198,18 @@ static void pulse_stream_read(pa_stream *p, size_t nbytes, void *userdata)
 
 	if (!frames) {
 		blog(LOG_ERROR, "Got audio hole of %u bytes",
-			(unsigned int) bytes);
+		     (unsigned int)bytes);
 		pa_stream_drop(data->stream);
 		goto exit;
 	}
 
 	struct obs_source_audio out;
-	out.speakers        = data->speakers;
+	out.speakers = data->speakers;
 	out.samples_per_sec = data->samples_per_sec;
-	out.format          = pulse_to_obs_audio_format(data->format);
-	out.data[0]         = (uint8_t *) frames;
-	out.frames          = bytes / data->bytes_per_frame;
-	out.timestamp       = get_sample_time(out.frames,
-	                                      out.samples_per_sec);
+	out.format = pulse_to_obs_audio_format(data->format);
+	out.data[0] = (uint8_t *)frames;
+	out.frames = bytes / data->bytes_per_frame;
+	out.timestamp = get_sample_time(out.frames, out.samples_per_sec);
 
 	if (!data->first_ts)
 		data->first_ts = out.timestamp + STARTUP_TIMEOUT_NS;
@@ -161,13 +229,34 @@ exit:
  * Server info callback
  */
 static void pulse_server_info(pa_context *c, const pa_server_info *i,
-	void *userdata)
+			      void *userdata)
 {
 	UNUSED_PARAMETER(c);
-	UNUSED_PARAMETER(userdata);
+	PULSE_DATA(userdata);
 
-	blog(LOG_INFO, "Server name: '%s %s'",
-		i->server_name, i->server_version);
+	blog(LOG_INFO, "Server name: '%s %s'", i->server_name,
+	     i->server_version);
+
+	if (data->is_default) {
+		bfree(data->device);
+		if (data->input) {
+			data->device = bstrdup(i->default_source_name);
+
+			blog(LOG_DEBUG, "Default input device: '%s'",
+			     data->device);
+		} else {
+			char *monitor =
+				bzalloc(strlen(i->default_sink_name) + 9);
+			strcat(monitor, i->default_sink_name);
+			strcat(monitor, ".monitor");
+
+			data->device = bstrdup(monitor);
+
+			blog(LOG_DEBUG, "Default output device: '%s'",
+			     data->device);
+			bfree(monitor);
+		}
+	}
 
 	pulse_signal(0);
 }
@@ -179,7 +268,7 @@ static void pulse_server_info(pa_context *c, const pa_server_info *i,
  * configured to something obs can't deal with.
  */
 static void pulse_source_info(pa_context *c, const pa_source_info *i, int eol,
-	void *userdata)
+			      void *userdata)
 {
 	UNUSED_PARAMETER(c);
 	PULSE_DATA(userdata);
@@ -192,35 +281,36 @@ static void pulse_source_info(pa_context *c, const pa_source_info *i, int eol,
 	if (eol > 0)
 		goto skip;
 
-	blog(LOG_INFO, "Audio format: %s, %"PRIu32" Hz"
-		", %"PRIu8" channels",
-		pa_sample_format_to_string(i->sample_spec.format),
-		i->sample_spec.rate,
-		i->sample_spec.channels);
+	blog(LOG_INFO,
+	     "Audio format: %s, %" PRIu32 " Hz"
+	     ", %" PRIu8 " channels",
+	     pa_sample_format_to_string(i->sample_spec.format),
+	     i->sample_spec.rate, i->sample_spec.channels);
 
 	pa_sample_format_t format = i->sample_spec.format;
 	if (pulse_to_obs_audio_format(format) == AUDIO_FORMAT_UNKNOWN) {
-		format = PA_SAMPLE_S16LE;
+		format = PA_SAMPLE_FLOAT32LE;
 
-		blog(LOG_INFO, "Sample format %s not supported by OBS,"
-			"using %s instead for recording",
-			pa_sample_format_to_string(i->sample_spec.format),
-			pa_sample_format_to_string(format));
+		blog(LOG_INFO,
+		     "Sample format %s not supported by OBS,"
+		     "using %s instead for recording",
+		     pa_sample_format_to_string(i->sample_spec.format),
+		     pa_sample_format_to_string(format));
 	}
 
 	uint8_t channels = i->sample_spec.channels;
 	if (pulse_channels_to_obs_speakers(channels) == SPEAKERS_UNKNOWN) {
 		channels = 2;
 
-		blog(LOG_INFO, "%c channels not supported by OBS,"
-			"using %c instead for recording",
-			i->sample_spec.channels,
-			channels);
+		blog(LOG_INFO,
+		     "%c channels not supported by OBS,"
+		     "using %c instead for recording",
+		     i->sample_spec.channels, channels);
 	}
 
-	data->format          = format;
+	data->format = format;
 	data->samples_per_sec = i->sample_spec.rate;
-	data->channels        = channels;
+	data->channels = channels;
 
 skip:
 	pulse_signal(0);
@@ -238,24 +328,25 @@ skip:
  */
 static int_fast32_t pulse_start_recording(struct pulse_data *data)
 {
-	if (pulse_get_server_info(pulse_server_info, (void *) data) < 0) {
+	if (pulse_get_server_info(pulse_server_info, (void *)data) < 0) {
 		blog(LOG_ERROR, "Unable to get server info !");
 		return -1;
 	}
 
 	if (pulse_get_source_info(pulse_source_info, data->device,
-			(void *) data) < 0) {
+				  (void *)data) < 0) {
 		blog(LOG_ERROR, "Unable to get source info !");
 		return -1;
 	}
 	if (data->format == PA_SAMPLE_INVALID) {
-		blog(LOG_ERROR, "An error occurred while getting the source info!");
+		blog(LOG_ERROR,
+		     "An error occurred while getting the source info!");
 		return -1;
 	}
 
 	pa_sample_spec spec;
-	spec.format   = data->format;
-	spec.rate     = data->samples_per_sec;
+	spec.format = data->format;
+	spec.rate = data->samples_per_sec;
 	spec.channels = data->channels;
 
 	if (!pa_sample_spec_valid(&spec)) {
@@ -266,8 +357,10 @@ static int_fast32_t pulse_start_recording(struct pulse_data *data)
 	data->speakers = pulse_channels_to_obs_speakers(spec.channels);
 	data->bytes_per_frame = pa_frame_size(&spec);
 
+	pa_channel_map channel_map = pulse_channel_map(data->speakers);
+
 	data->stream = pulse_stream_new(obs_source_get_name(data->source),
-		&spec, NULL);
+					&spec, &channel_map);
 	if (!data->stream) {
 		blog(LOG_ERROR, "Unable to create stream");
 		return -1;
@@ -275,21 +368,23 @@ static int_fast32_t pulse_start_recording(struct pulse_data *data)
 
 	pulse_lock();
 	pa_stream_set_read_callback(data->stream, pulse_stream_read,
-		(void *) data);
+				    (void *)data);
 	pulse_unlock();
 
 	pa_buffer_attr attr;
-	attr.fragsize  = pa_usec_to_bytes(25000, &spec);
-	attr.maxlength = (uint32_t) -1;
-	attr.minreq    = (uint32_t) -1;
-	attr.prebuf    = (uint32_t) -1;
-	attr.tlength   = (uint32_t) -1;
+	attr.fragsize = pa_usec_to_bytes(25000, &spec);
+	attr.maxlength = (uint32_t)-1;
+	attr.minreq = (uint32_t)-1;
+	attr.prebuf = (uint32_t)-1;
+	attr.tlength = (uint32_t)-1;
 
 	pa_stream_flags_t flags = PA_STREAM_ADJUST_LATENCY;
+	if (!data->is_default)
+		flags |= PA_STREAM_DONT_MOVE;
 
 	pulse_lock();
 	int_fast32_t ret = pa_stream_connect_record(data->stream, data->device,
-		&attr, flags);
+						    &attr, flags);
 	pulse_unlock();
 	if (ret < 0) {
 		pulse_stop_recording(data);
@@ -297,7 +392,12 @@ static int_fast32_t pulse_start_recording(struct pulse_data *data)
 		return -1;
 	}
 
-	blog(LOG_INFO, "Started recording from '%s'", data->device);
+	if (data->is_default)
+		blog(LOG_INFO, "Started recording from '%s' (default)",
+		     data->device);
+	else
+		blog(LOG_INFO, "Started recording from '%s'", data->device);
+
 	return 0;
 }
 
@@ -315,8 +415,9 @@ static void pulse_stop_recording(struct pulse_data *data)
 	}
 
 	blog(LOG_INFO, "Stopped recording from '%s'", data->device);
-	blog(LOG_INFO, "Got %"PRIuFAST32" packets with %"PRIuFAST64" frames",
-		data->packets, data->frames);
+	blog(LOG_INFO,
+	     "Got %" PRIuFAST32 " packets with %" PRIuFAST64 " frames",
+	     data->packets, data->frames);
 
 	data->first_ts = 0;
 	data->packets = 0;
@@ -327,14 +428,14 @@ static void pulse_stop_recording(struct pulse_data *data)
  * input info callback
  */
 static void pulse_input_info(pa_context *c, const pa_source_info *i, int eol,
-	void *userdata)
+			     void *userdata)
 {
 	UNUSED_PARAMETER(c);
 	if (eol != 0 || i->monitor_of_sink != PA_INVALID_INDEX)
 		goto skip;
 
-	obs_property_list_add_string((obs_property_t*) userdata,
-		i->description, i->name);
+	obs_property_list_add_string((obs_property_t *)userdata, i->description,
+				     i->name);
 
 skip:
 	pulse_signal(0);
@@ -343,15 +444,15 @@ skip:
 /**
  * output info callback
  */
-static void pulse_output_info(pa_context *c, const pa_source_info *i, int eol,
-	void *userdata)
+static void pulse_output_info(pa_context *c, const pa_sink_info *i, int eol,
+			      void *userdata)
 {
 	UNUSED_PARAMETER(c);
-	if (eol != 0 || i->monitor_of_sink == PA_INVALID_INDEX)
+	if (eol != 0 || i->monitor_source == PA_INVALID_INDEX)
 		goto skip;
 
-	obs_property_list_add_string((obs_property_t*) userdata,
-		i->description, i->name);
+	obs_property_list_add_string((obs_property_t *)userdata, i->description,
+				     i->monitor_source_name);
 
 skip:
 	pulse_signal(0);
@@ -363,14 +464,22 @@ skip:
 static obs_properties_t *pulse_properties(bool input)
 {
 	obs_properties_t *props = obs_properties_create();
-	obs_property_t *devices = obs_properties_add_list(props, "device_id",
-		obs_module_text("Device"), OBS_COMBO_TYPE_LIST,
-		OBS_COMBO_FORMAT_STRING);
+	obs_property_t *devices = obs_properties_add_list(
+		props, "device_id", obs_module_text("Device"),
+		OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 
 	pulse_init();
-	pa_source_info_cb_t cb = (input) ? pulse_input_info : pulse_output_info;
-	pulse_get_source_info_list(cb, (void *) devices);
+	if (input)
+		pulse_get_source_info_list(pulse_input_info, (void *)devices);
+	else
+		pulse_get_sink_info_list(pulse_output_info, (void *)devices);
 	pulse_unref();
+
+	size_t count = obs_property_list_item_count(devices);
+
+	if (count > 0)
+		obs_property_list_insert_string(
+			devices, 0, obs_module_text("Default"), "default");
 
 	return props;
 }
@@ -390,60 +499,11 @@ static obs_properties_t *pulse_output_properties(void *unused)
 }
 
 /**
- * Server info callback
- */
-static void pulse_input_device(pa_context *c, const pa_server_info *i,
-	void *userdata)
-{
-	UNUSED_PARAMETER(c);
-	obs_data_t *settings = (obs_data_t*) userdata;
-
-	obs_data_set_default_string(settings, "device_id",
-		i->default_source_name);
-	blog(LOG_DEBUG, "Default input device: '%s'", i->default_source_name);
-
-	pulse_signal(0);
-}
-
-static void pulse_output_device(pa_context *c, const pa_server_info *i,
-	void *userdata)
-{
-	UNUSED_PARAMETER(c);
-	obs_data_t *settings = (obs_data_t*) userdata;
-
-	char *monitor = bzalloc(strlen(i->default_sink_name) + 9);
-	strcat(monitor, i->default_sink_name);
-	strcat(monitor, ".monitor");
-
-	obs_data_set_default_string(settings, "device_id", monitor);
-	blog(LOG_DEBUG, "Default output device: '%s'", monitor);
-	bfree(monitor);
-
-	pulse_signal(0);
-}
-
-/**
  * Get plugin defaults
  */
-static void pulse_defaults(obs_data_t *settings, bool input)
+static void pulse_defaults(obs_data_t *settings)
 {
-	pulse_init();
-
-	pa_server_info_cb_t cb = (input)
-		? pulse_input_device : pulse_output_device;
-	pulse_get_server_info(cb, (void *) settings);
-
-	pulse_unref();
-}
-
-static void pulse_input_defaults(obs_data_t *settings)
-{
-	return pulse_defaults(settings, true);
-}
-
-static void pulse_output_defaults(obs_data_t *settings)
-{
-	return pulse_defaults(settings, false);
+	obs_data_set_default_string(settings, "device_id", "default");
 }
 
 /**
@@ -494,6 +554,7 @@ static void pulse_update(void *vptr, obs_data_t *settings)
 		if (data->device)
 			bfree(data->device);
 		data->device = bstrdup(new_device);
+		data->is_default = strcmp("default", data->device) == 0;
 		restart = true;
 	}
 
@@ -508,11 +569,13 @@ static void pulse_update(void *vptr, obs_data_t *settings)
 /**
  * Create the plugin object
  */
-static void *pulse_create(obs_data_t *settings, obs_source_t *source)
+static void *pulse_create(obs_data_t *settings, obs_source_t *source,
+			  bool input)
 {
 	struct pulse_data *data = bzalloc(sizeof(struct pulse_data));
 
-	data->source   = source;
+	data->input = input;
+	data->source = source;
 
 	pulse_init();
 	pulse_update(data, settings);
@@ -520,29 +583,39 @@ static void *pulse_create(obs_data_t *settings, obs_source_t *source)
 	return data;
 }
 
+static void *pulse_input_create(obs_data_t *settings, obs_source_t *source)
+{
+	return pulse_create(settings, source, true);
+}
+
+static void *pulse_output_create(obs_data_t *settings, obs_source_t *source)
+{
+	return pulse_create(settings, source, false);
+}
+
 struct obs_source_info pulse_input_capture = {
-	.id             = "pulse_input_capture",
-	.type           = OBS_SOURCE_TYPE_INPUT,
-	.output_flags   = OBS_SOURCE_AUDIO |
-	                  OBS_SOURCE_DO_NOT_DUPLICATE,
-	.get_name       = pulse_input_getname,
-	.create         = pulse_create,
-	.destroy        = pulse_destroy,
-	.update         = pulse_update,
-	.get_defaults   = pulse_input_defaults,
-	.get_properties = pulse_input_properties
+	.id = "pulse_input_capture",
+	.type = OBS_SOURCE_TYPE_INPUT,
+	.output_flags = OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE,
+	.get_name = pulse_input_getname,
+	.create = pulse_input_create,
+	.destroy = pulse_destroy,
+	.update = pulse_update,
+	.get_defaults = pulse_defaults,
+	.get_properties = pulse_input_properties,
+	.icon_type = OBS_ICON_TYPE_AUDIO_INPUT,
 };
 
 struct obs_source_info pulse_output_capture = {
-	.id             = "pulse_output_capture",
-	.type           = OBS_SOURCE_TYPE_INPUT,
-	.output_flags   = OBS_SOURCE_AUDIO |
-	                  OBS_SOURCE_DO_NOT_DUPLICATE |
-	                  OBS_SOURCE_DO_NOT_SELF_MONITOR,
-	.get_name       = pulse_output_getname,
-	.create         = pulse_create,
-	.destroy        = pulse_destroy,
-	.update         = pulse_update,
-	.get_defaults   = pulse_output_defaults,
-	.get_properties = pulse_output_properties
+	.id = "pulse_output_capture",
+	.type = OBS_SOURCE_TYPE_INPUT,
+	.output_flags = OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE |
+			OBS_SOURCE_DO_NOT_SELF_MONITOR,
+	.get_name = pulse_output_getname,
+	.create = pulse_output_create,
+	.destroy = pulse_destroy,
+	.update = pulse_update,
+	.get_defaults = pulse_defaults,
+	.get_properties = pulse_output_properties,
+	.icon_type = OBS_ICON_TYPE_AUDIO_OUTPUT,
 };

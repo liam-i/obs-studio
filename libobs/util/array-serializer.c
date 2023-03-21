@@ -20,7 +20,7 @@
 static size_t array_output_write(void *param, const void *data, size_t size)
 {
 	struct array_output_data *output = param;
-	da_push_back_array(output->bytes, data, size);
+	da_push_back_array(output->bytes, (uint8_t *)data, size);
 	return size;
 }
 
@@ -31,12 +31,12 @@ static int64_t array_output_get_pos(void *param)
 }
 
 void array_output_serializer_init(struct serializer *s,
-		struct array_output_data *data)
+				  struct array_output_data *data)
 {
 	memset(s, 0, sizeof(struct serializer));
 	memset(data, 0, sizeof(struct array_output_data));
-	s->data    = data;
-	s->write   = array_output_write;
+	s->data = data;
+	s->write = array_output_write;
 	s->get_pos = array_output_get_pos;
 }
 

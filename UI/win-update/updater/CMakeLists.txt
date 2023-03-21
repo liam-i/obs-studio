@@ -1,51 +1,44 @@
-if(NOT ENABLE_WIN_UPDATER)
-	return()
-endif()
-
-if(NOT DEFINED STATIC_ZLIB_PATH OR "${STATIC_ZLIB_PATH}" STREQUAL "")
-	message(STATUS "STATIC_ZLIB_PATH not set, windows updater disabled")
-	return()
-endif()
-
 project(updater)
 
-include_directories(${OBS_JANSSON_INCLUDE_DIRS})
-include_directories(${LIBLZMA_INCLUDE_DIRS})
-include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/libobs")
-include_directories(${BLAKE2_INCLUDE_DIR})
+option(ENABLE_UPDATER "Build with Windows updater" ON)
 
-find_package(ZLIB REQUIRED)
-
-set(updater_HEADERS
-	../win-update-helpers.hpp
-	resource.h
-	updater.hpp
-	)
-set(updater_SOURCES
-	../win-update-helpers.cpp
-	updater.cpp
-	patch.cpp
-	http.cpp
-	hash.cpp
-	updater.rc
-	)
-
-add_definitions(-DNOMINMAX -DUNICODE -D_UNICODE)
-if(MSVC)
-	add_compile_options("$<$<CONFIG:RelWithDebInfo>:/MT>")
+if(NOT ENABLE_UPDATER)
+  message(STATUS "OBS:  DISABLED   Windows updater")
+  return()
 endif()
 
-add_executable(updater WIN32
-	${updater_HEADERS}
-	${updater_SOURCES}
-	)
-target_link_libraries(updater
-	${OBS_JANSSON_IMPORT}
-	${STATIC_ZLIB_PATH}
-	lzma
-	blake2
-	psapi
-	comctl32
-	shell32
-	winhttp
-	)
+find_package(zstd)
+
+add_executable(updater WIN32)
+
+target_sources(
+  updater
+  PRIVATE updater.cpp
+          updater.hpp
+          patch.cpp
+          http.cpp
+          hash.cpp
+          resource.h
+          updater.rc
+          init-hook-files.c
+          updater.manifest
+          helpers.cpp
+          helpers.hpp
+          ${CMAKE_SOURCE_DIR}/deps/json11/json11.hpp
+          ${CMAKE_SOURCE_DIR}/deps/json11/json11.cpp)
+
+target_include_directories(updater PRIVATE ${CMAKE_SOURCE_DIR}/libobs
+                                           ${CMAKE_SOURCE_DIR}/deps/json11)
+
+target_compile_definitions(updater PRIVATE NOMINMAX "PSAPI_VERSION=2")
+
+if(MSVC)
+  target_compile_options(updater PRIVATE $<IF:$<CONFIG:DEBUG>,/MTd,/MT>)
+  target_compile_options(updater PRIVATE "/utf-8")
+  target_link_options(updater PRIVATE "LINKER:/IGNORE:4098")
+endif()
+
+target_link_libraries(updater PRIVATE OBS::blake2 zstd::libzstd_static comctl32
+                                      shell32 winhttp)
+
+set_target_properties(updater PROPERTIES FOLDER "frontend")

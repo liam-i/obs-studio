@@ -32,13 +32,32 @@
 #include "rtmp_sys.h"
 #include "log.h"
 
+#include <util/platform.h>
+
+#if !defined(MSG_NOSIGNAL)
+#define MSG_NOSIGNAL 0
+#endif
+
 #ifdef CRYPTO
 
 #ifdef __APPLE__
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #endif
 
-#ifdef USE_POLARSSL
+#if defined(USE_MBEDTLS)
+#if defined(_WIN32)
+#include <windows.h>
+#include <wincrypt.h>
+#elif defined(__APPLE__)
+#include <Security/Security.h>
+#endif
+
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/md5.h>
+#include <mbedtls/base64.h>
+#define MD5_DIGEST_LENGTH 16
+
+#elif defined(USE_POLARSSL)
 #include <polarssl/havege.h>
 #include <polarssl/md5.h>
 #include <polarssl/base64.h>
@@ -55,7 +74,6 @@ static const char *my_dhm_P =
     "E8A700D60B7F1200FA8E77B0A979DABF";
 
 static const char *my_dhm_G = "4";
-
 #elif defined(USE_GNUTLS)
 #include <gnutls/gnutls.h>
 #define MD5_DIGEST_LENGTH 16
@@ -63,12 +81,20 @@ static const char *my_dhm_G = "4";
 #include <nettle/md5.h>
 #else	/* USE_OPENSSL */
 #include <openssl/ssl.h>
-#include <openssl/rc4.h>
 #include <openssl/md5.h>
 #include <openssl/bio.h>
 #include <openssl/buffer.h>
 #endif
-TLS_CTX RTMP_TLS_ctx;
+#endif
+
+#if defined(TCP_USER_TIMEOUT)
+#define SOCKET_LEVEL IPPROTO_TCP
+#define SOCKET_TIMEOUT_OPT TCP_USER_TIMEOUT
+#define SOCKET_TIMEOUT_VAR(tv, s) int tv = s*1000
+#else
+#define SOCKET_LEVEL SOL_SOCKET
+#define SOCKET_TIMEOUT_OPT SO_SNDTIMEO
+#define SOCKET_TIMEOUT_VAR(tv, s) SET_RCVTIMEO(tv, s)
 #endif
 
 #define RTMP_SIG_SIZE 1536
@@ -224,9 +250,15 @@ RTMPPacket_Reset(RTMPPacket *p)
 }
 
 int
-RTMPPacket_Alloc(RTMPPacket *p, int nSize)
+RTMPPacket_Alloc(RTMPPacket *p, uint32_t nSize)
 {
-    char *ptr = calloc(1, nSize + RTMP_MAX_HEADER_SIZE);
+    char *ptr;
+#if ARCH_BITS == 32
+    if (nSize > SIZE_MAX - RTMP_MAX_HEADER_SIZE)
+        return FALSE;
+#endif
+
+    ptr = calloc(1, nSize + RTMP_MAX_HEADER_SIZE);
     if (!ptr)
         return FALSE;
     p->m_body = ptr + RTMP_MAX_HEADER_SIZE;
@@ -260,10 +292,113 @@ RTMP_LibVersion()
 }
 
 void
-RTMP_TLS_Init()
+RTMP_TLS_LoadCerts(RTMP *r) {
+#ifdef USE_MBEDTLS
+    mbedtls_x509_crt *chain = r->RTMP_TLS_ctx->cacert = calloc(1, sizeof(struct mbedtls_x509_crt));
+    mbedtls_x509_crt_init(chain);
+
+#if defined(_WIN32)
+    HCERTSTORE hCertStore;
+    PCCERT_CONTEXT pCertContext = NULL;
+
+    if (!(hCertStore = CertOpenSystemStore((HCRYPTPROV)NULL, L"ROOT"))) {
+        goto error;
+    }
+
+    while (pCertContext = CertEnumCertificatesInStore(hCertStore, pCertContext)) {
+        mbedtls_x509_crt_parse_der(chain,
+                                   (unsigned char *)pCertContext->pbCertEncoded,
+                                   pCertContext->cbCertEncoded);
+    }
+
+    CertFreeCertificateContext(pCertContext);
+    CertCloseStore(hCertStore, 0);
+#elif defined(__APPLE__)
+    SecKeychainRef keychain_ref;
+    CFMutableDictionaryRef search_settings_ref;
+    CFArrayRef result_ref;
+
+    if (SecKeychainOpen("/System/Library/Keychains/SystemRootCertificates.keychain",
+                        &keychain_ref)
+        != errSecSuccess) {
+      goto error;
+    }
+
+    search_settings_ref = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
+    CFDictionarySetValue(search_settings_ref, kSecClass, kSecClassCertificate);
+    CFDictionarySetValue(search_settings_ref, kSecMatchLimit, kSecMatchLimitAll);
+    CFDictionarySetValue(search_settings_ref, kSecReturnRef, kCFBooleanTrue);
+    CFDictionarySetValue(search_settings_ref, kSecMatchSearchList,
+                         CFArrayCreate(NULL, (const void **)&keychain_ref, 1, NULL));
+
+    if (SecItemCopyMatching(search_settings_ref, (CFTypeRef *)&result_ref)
+        != errSecSuccess) {
+      goto error;
+    }
+
+    for (CFIndex i = 0; i < CFArrayGetCount(result_ref); i++) {
+      SecCertificateRef item_ref = (SecCertificateRef)
+                                   CFArrayGetValueAtIndex(result_ref, i);
+      CFDataRef data_ref;
+
+      if ((data_ref = SecCertificateCopyData(item_ref))) {
+        mbedtls_x509_crt_parse_der(chain,
+                                   (unsigned char *)CFDataGetBytePtr(data_ref),
+                                   CFDataGetLength(data_ref));
+        CFRelease(data_ref);
+      }
+    }
+
+    CFRelease(keychain_ref);
+#elif defined(__linux__)
+    if (mbedtls_x509_crt_parse_path(chain, "/etc/ssl/certs/") < 0) {
+        RTMP_Log(RTMP_LOGERROR, "mbedtls_x509_crt_parse_path: Couldn't parse "
+            "/etc/ssl/certs");
+        goto error;
+    }
+#elif defined(__OpenBSD__)
+    if (mbedtls_x509_crt_parse_file(chain, "/etc/ssl/cert.pem") < 0) {
+        RTMP_Log(RTMP_LOGERROR, "mbedtls_x509_crt_parse_file: Couldn't parse "
+            "/etc/ssl/cert.pem");
+        goto error;
+    }
+#endif
+
+    mbedtls_ssl_conf_ca_chain(&r->RTMP_TLS_ctx->conf, chain, NULL);
+    return;
+
+error:
+    RTMP_Log(RTMP_LOGERROR, "RTMP_TLS_LoadCerts: Failed to load "
+        "root certificate chains, RTMPS connections will likely "
+        "fail");
+    mbedtls_x509_crt_free(chain);
+    free(chain);
+    r->RTMP_TLS_ctx->cacert = NULL;
+#else /* USE_MBEDTLS */
+	UNUSED_PARAMETER(r);
+#endif /* USE_MBEDTLS */
+}
+
+void
+RTMP_TLS_Init(RTMP *r)
 {
 #ifdef CRYPTO
-#ifdef USE_POLARSSL
+#if defined(USE_MBEDTLS)
+    const char * pers = "RTMP_TLS";
+    r->RTMP_TLS_ctx = calloc(1,sizeof(struct tls_ctx));
+
+    mbedtls_ssl_config_init(&r->RTMP_TLS_ctx->conf);
+    mbedtls_ctr_drbg_init(&r->RTMP_TLS_ctx->ctr_drbg);
+    mbedtls_entropy_init(&r->RTMP_TLS_ctx->entropy);
+
+    mbedtls_ctr_drbg_seed(&r->RTMP_TLS_ctx->ctr_drbg,
+                          mbedtls_entropy_func,
+                          &r->RTMP_TLS_ctx->entropy,
+                          (const unsigned char *)pers,
+                          strlen(pers));
+
+    RTMP_TLS_LoadCerts(r);
+#elif defined(USE_POLARSSL)
     /* Do this regardless of NO_SSL, we use havege for rtmpe too */
     RTMP_TLS_ctx = calloc(1,sizeof(struct tls_ctx));
     havege_init(&RTMP_TLS_ctx->hs);
@@ -287,75 +422,32 @@ RTMP_TLS_Init()
     SSL_CTX_set_options(RTMP_TLS_ctx, SSL_OP_ALL);
     SSL_CTX_set_default_verify_paths(RTMP_TLS_ctx);
 #endif
-#endif
-}
-
-void *
-RTMP_TLS_AllocServerContext(const char* cert, const char* key)
-{
-    void *ctx = NULL;
-#ifdef CRYPTO
-    if (!RTMP_TLS_ctx)
-        RTMP_TLS_Init();
-#ifdef USE_POLARSSL
-    tls_server_ctx *tc = ctx = calloc(1, sizeof(struct tls_server_ctx));
-    tc->dhm_P = my_dhm_P;
-    tc->dhm_G = my_dhm_G;
-    tc->hs = &RTMP_TLS_ctx->hs;
-    if (x509parse_crtfile(&tc->cert, cert))
-    {
-        free(tc);
-        return NULL;
-    }
-    if (x509parse_keyfile(&tc->key, key, NULL))
-    {
-        x509_free(&tc->cert);
-        free(tc);
-        return NULL;
-    }
-#elif defined(USE_GNUTLS) && !defined(NO_SSL)
-    gnutls_certificate_allocate_credentials((gnutls_certificate_credentials*) &ctx);
-    if (gnutls_certificate_set_x509_key_file(ctx, cert, key, GNUTLS_X509_FMT_PEM) != 0)
-    {
-        gnutls_certificate_free_credentials(ctx);
-        return NULL;
-    }
-#elif !defined(NO_SSL) /* USE_OPENSSL */
-    ctx = SSL_CTX_new(SSLv23_server_method());
-    if (!SSL_CTX_use_certificate_chain_file(ctx, cert))
-    {
-        SSL_CTX_free(ctx);
-        return NULL;
-    }
-    if (!SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM))
-    {
-        SSL_CTX_free(ctx);
-        return NULL;
-    }
-#endif
 #else
-    (void)cert;
-    (void)key;
+	UNUSED_PARAMETER(r);
 #endif
-    return ctx;
 }
 
 void
-RTMP_TLS_FreeServerContext(void *ctx)
-{
-#ifdef CRYPTO
-#ifdef USE_POLARSSL
-    x509_free(&((tls_server_ctx*)ctx)->cert);
-    rsa_free(&((tls_server_ctx*)ctx)->key);
-    free(ctx);
-#elif defined(USE_GNUTLS) && !defined(NO_SSL)
-    gnutls_certificate_free_credentials(ctx);
-#elif !defined(NO_SSL) /* USE_OPENSSL */
-    SSL_CTX_free(ctx);
-#endif
+RTMP_TLS_Free(RTMP *r) {
+#if defined(CRYPTO) && defined(USE_MBEDTLS)
 
+    if (!r->RTMP_TLS_ctx)
+        return;
+    mbedtls_ssl_config_free(&r->RTMP_TLS_ctx->conf);
+    mbedtls_ctr_drbg_free(&r->RTMP_TLS_ctx->ctr_drbg);
+    mbedtls_entropy_free(&r->RTMP_TLS_ctx->entropy);
+
+    if (r->RTMP_TLS_ctx->cacert) {
+        mbedtls_x509_crt_free(r->RTMP_TLS_ctx->cacert);
+        free(r->RTMP_TLS_ctx->cacert);
+        r->RTMP_TLS_ctx->cacert = NULL;
+    }
+
+    // NO mbedtls_net_free() BECAUSE WE SET IT UP BY HAND!
+    free(r->RTMP_TLS_ctx);
+    r->RTMP_TLS_ctx = NULL;
 #else
-    (void)ctx;
+	UNUSED_PARAMETER(r);
 #endif
 }
 
@@ -368,19 +460,22 @@ RTMP_Alloc()
 void
 RTMP_Free(RTMP *r)
 {
+    RTMP_TLS_Free(r);
     free(r);
 }
 
 void
 RTMP_Init(RTMP *r)
 {
-#ifdef CRYPTO
-    if (!RTMP_TLS_ctx)
-        RTMP_TLS_Init();
-#endif
-
     memset(r, 0, sizeof(RTMP));
     r->m_sb.sb_socket = -1;
+    RTMP_Reset(r);
+    RTMP_TLS_Init(r);
+}
+
+void
+RTMP_Reset(RTMP *r)
+{
     r->m_inChunkSize = RTMP_DEFAULT_CHUNKSIZE;
     r->m_outChunkSize = RTMP_DEFAULT_CHUNKSIZE;
     r->m_bSendChunkSizeInfo = 1;
@@ -392,7 +487,8 @@ RTMP_Init(RTMP *r)
     r->m_fVideoCodecs = 252.0;
     r->Link.curStreamIdx = 0;
     r->Link.nStreams = 0;
-    r->Link.timeout = 30;
+    r->Link.receiveTimeout = 30;
+    r->Link.sendTimeout = 15;
     r->Link.swfAge = 30;
 }
 
@@ -617,8 +713,12 @@ int RTMP_SetupURL(RTMP *r, char *url)
 
 #ifdef CRYPTO
     if ((r->Link.lFlags & RTMP_LF_SWFV) && r->Link.swfUrl.av_len)
+#ifdef USE_HASHSWF
         RTMP_HashSWF(r->Link.swfUrl.av_val, &r->Link.SWFSize,
         (unsigned char *)r->Link.SWFHash, r->Link.swfAge);
+#else
+        return FALSE;
+#endif
 #endif
 
     SocksSetup(r, &r->Link.sockshost);
@@ -650,7 +750,7 @@ int RTMP_AddStream(RTMP *r, const char *playpath)
 }
 
 static int
-add_addr_info(struct sockaddr_storage *service, socklen_t *addrlen, AVal *host, int port, socklen_t addrlen_hint)
+add_addr_info(struct sockaddr_storage *service, socklen_t *addrlen, AVal *host, int port, socklen_t addrlen_hint, int *socket_error)
 {
     char *hostname;
     int ret = TRUE;
@@ -681,7 +781,7 @@ add_addr_info(struct sockaddr_storage *service, socklen_t *addrlen, AVal *host, 
 
     char portStr[8];
 
-    sprintf(portStr, "%d", port);
+    snprintf(portStr, sizeof(portStr), "%d", port);
 
     int err = getaddrinfo(hostname, portStr, &hints, &result);
 
@@ -691,6 +791,7 @@ add_addr_info(struct sockaddr_storage *service, socklen_t *addrlen, AVal *host, 
 #define gai_strerrorA gai_strerror
 #endif
         RTMP_Log(RTMP_LOGERROR, "Could not resolve %s: %s (%d)", hostname, gai_strerrorA(GetSockError()), GetSockError());
+        *socket_error = GetSockError();
         ret = FALSE;
         goto finish;
     }
@@ -706,23 +807,34 @@ add_addr_info(struct sockaddr_storage *service, socklen_t *addrlen, AVal *host, 
         }
     }
 
-	if (!*addrlen)
-	{
-		for (ptr = result; ptr != NULL; ptr = ptr->ai_next)
-		{
+    if (!*addrlen)
+    {
+        for (ptr = result; ptr != NULL; ptr = ptr->ai_next)
+        {
             if (ptr->ai_family == AF_INET6 && (!addrlen_hint || ptr->ai_addrlen == addrlen_hint))
-			{
-				memcpy(service, ptr->ai_addr, ptr->ai_addrlen);
-				*addrlen = (socklen_t)ptr->ai_addrlen;
-				break;
-			}
-		}
-	}
+            {
+                memcpy(service, ptr->ai_addr, ptr->ai_addrlen);
+                *addrlen = (socklen_t)ptr->ai_addrlen;
+                break;
+            }
+        }
+    }
 
     freeaddrinfo(result);
 
     if (service->ss_family == AF_UNSPEC || *addrlen == 0)
     {
+        // since we're handling multiple addresses internally, fake the correct error response
+#ifdef _WIN32
+        *socket_error = WSANO_DATA;
+#elif __FreeBSD__
+        *socket_error = ENOATTR;
+#elif defined(ENODATA)
+        *socket_error = ENODATA;
+#else
+        *socket_error = EAFNOSUPPORT;
+#endif
+
         RTMP_Log(RTMP_LOGERROR, "Could not resolve server '%s': no valid address found", hostname);
         ret = FALSE;
         goto finish;
@@ -761,6 +873,11 @@ RTMP_Connect0(RTMP *r, struct sockaddr * service, socklen_t addrlen)
 
     if (r->m_sb.sb_socket != INVALID_SOCKET)
     {
+#ifndef _WIN32
+#ifdef SO_NOSIGPIPE
+        setsockopt(r->m_sb.sb_socket, SOL_SOCKET, SO_NOSIGPIPE, &(int){ 1 }, sizeof(int));
+#endif
+#endif
         if(r->m_bindIP.addrLen)
         {
             if (bind(r->m_sb.sb_socket, (const struct sockaddr *)&r->m_bindIP.addr, r->m_bindIP.addrLen) < 0)
@@ -768,10 +885,13 @@ RTMP_Connect0(RTMP *r, struct sockaddr * service, socklen_t addrlen)
                 int err = GetSockError();
                 RTMP_Log(RTMP_LOGERROR, "%s, failed to bind socket: %s (%d)",
                          __FUNCTION__, socketerror(err), err);
+                r->last_error_code = err;
                 RTMP_Close(r);
                 return FALSE;
             }
         }
+
+        uint64_t connect_start = os_gettime_ns();
 
         if (connect(r->m_sb.sb_socket, service, addrlen) < 0)
         {
@@ -785,9 +905,12 @@ RTMP_Connect0(RTMP *r, struct sockaddr * service, socklen_t addrlen)
             else
                 RTMP_Log(RTMP_LOGERROR, "%s, failed to connect socket: %s (%d)",
                      __FUNCTION__, socketerror(err), err);
+            r->last_error_code = err;
             RTMP_Close(r);
             return FALSE;
         }
+
+        r->connect_time_ms = (int)((os_gettime_ns() - connect_start) / 1000000);
 
         if (r->Link.socksport)
         {
@@ -809,13 +932,22 @@ RTMP_Connect0(RTMP *r, struct sockaddr * service, socklen_t addrlen)
 
     /* set timeout */
     {
-        SET_RCVTIMEO(tv, r->Link.timeout);
+        SET_RCVTIMEO(tvr, r->Link.receiveTimeout);
         if (setsockopt
-                (r->m_sb.sb_socket, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof(tv)))
+                (r->m_sb.sb_socket, SOL_SOCKET, SO_RCVTIMEO, (char *)&tvr, sizeof(tvr)))
         {
-            RTMP_Log(RTMP_LOGERROR, "%s, Setting socket timeout to %ds failed!",
-                     __FUNCTION__, r->Link.timeout);
+            RTMP_Log(RTMP_LOGERROR, "%s, Setting socket receive timeout to %ds failed!",
+                     __FUNCTION__, r->Link.receiveTimeout);
         }
+
+#if defined(SOCKET_TIMEOUT_OPT)
+		SOCKET_TIMEOUT_VAR(to, r->Link.sendTimeout);
+		if (setsockopt(r->m_sb.sb_socket, SOCKET_LEVEL, SOCKET_TIMEOUT_OPT, &to, sizeof(to)))
+        {
+                RTMP_Log(RTMP_LOGERROR, "%s, Setting socket SOCKET_TIMEOUT_OPT to %ds failed!",
+                     __FUNCTION__, r->Link.sendTimeout);
+        }
+#endif
     }
 
     if(!r->m_bUseNagle)
@@ -825,35 +957,68 @@ RTMP_Connect0(RTMP *r, struct sockaddr * service, socklen_t addrlen)
 }
 
 int
-RTMP_TLS_Accept(RTMP *r, void *ctx)
-{
-#if defined(CRYPTO) && !defined(NO_SSL)
-    TLS_server(ctx, r->m_sb.sb_ssl);
-    TLS_setfd(r->m_sb.sb_ssl, r->m_sb.sb_socket);
-    if (TLS_accept(r->m_sb.sb_ssl) < 0)
-    {
-        RTMP_Log(RTMP_LOGERROR, "%s, TLS_Connect failed", __FUNCTION__);
-        return FALSE;
-    }
-    return TRUE;
-#else
-    (void)r;
-    (void)ctx;
-    return FALSE;
-#endif
-}
-
-int
 RTMP_Connect1(RTMP *r, RTMPPacket *cp)
 {
     if (r->Link.protocol & RTMP_FEATURE_SSL)
     {
 #if defined(CRYPTO) && !defined(NO_SSL)
-        TLS_client(RTMP_TLS_ctx, r->m_sb.sb_ssl);
+        TLS_client(r->RTMP_TLS_ctx, r->m_sb.sb_ssl);
+
+#if defined(USE_MBEDTLS)
+        mbedtls_net_context *server_fd = &r->RTMP_TLS_ctx->net;
+#if MBEDTLS_VERSION_NUMBER == 0x03000000
+        server_fd->MBEDTLS_PRIVATE(fd) = r->m_sb.sb_socket;
+#else
+        server_fd->fd = r->m_sb.sb_socket;
+#endif
+        TLS_setfd(r->m_sb.sb_ssl, server_fd);
+
+        // make sure we verify the certificate hostname
+        char hostname[MBEDTLS_SSL_MAX_HOST_NAME_LEN + 1];
+
+        if (r->Link.hostname.av_len >= MBEDTLS_SSL_MAX_HOST_NAME_LEN)
+            return FALSE;
+
+        memcpy(hostname, r->Link.hostname.av_val, r->Link.hostname.av_len);
+        hostname[r->Link.hostname.av_len] = 0;
+
+        if (mbedtls_ssl_set_hostname(r->m_sb.sb_ssl, hostname))
+            return FALSE;
+#else
         TLS_setfd(r->m_sb.sb_ssl, r->m_sb.sb_socket);
-        if (TLS_connect(r->m_sb.sb_ssl) < 0)
+#endif
+
+        int connect_return = TLS_connect(r->m_sb.sb_ssl);
+        if (connect_return < 0)
         {
-            RTMP_Log(RTMP_LOGERROR, "%s, TLS_Connect failed", __FUNCTION__);
+#if defined(USE_MBEDTLS)
+            r->last_error_code = connect_return;
+            if (connect_return == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED)
+            {
+                // show a more detailed error in the log if possible
+                int verify_result = mbedtls_ssl_get_verify_result(r->m_sb.sb_ssl);
+                if (verify_result)
+                {
+                    char err[256], *e;
+                    if (mbedtls_x509_crt_verify_info(err, sizeof(err), "", verify_result) > 0)
+                    {
+                        e = strchr(err, '\n');
+                        if (e)
+                            *e = '\0';
+                    }
+                    else
+                    {
+                        strcpy(err, "unknown error");
+                    }
+                    RTMP_Log(RTMP_LOGERROR, "%s, Cert verify failed: %d (%s)", __FUNCTION__, verify_result, err);
+                    RTMP_Close(r);
+                    return FALSE;
+                }
+            }
+#endif
+            // output the error in a format that matches mbedTLS
+            connect_return = abs(connect_return);
+            RTMP_Log(RTMP_LOGERROR, "%s, TLS_Connect failed: -0x%x", __FUNCTION__, connect_return);
             RTMP_Close(r);
             return FALSE;
         }
@@ -861,7 +1026,6 @@ RTMP_Connect1(RTMP *r, RTMPPacket *cp)
         RTMP_Log(RTMP_LOGERROR, "%s, no SSL/TLS support", __FUNCTION__);
         RTMP_Close(r);
         return FALSE;
-
 #endif
     }
     if (r->Link.protocol & RTMP_FEATURE_HTTP)
@@ -906,6 +1070,8 @@ RTMP_Connect(RTMP *r, RTMPPacket *cp)
     struct sockaddr_storage service;
     socklen_t addrlen = 0;
     socklen_t addrlen_hint = 0;
+    int socket_error = 0;
+
     if (!r->Link.hostname.av_len)
         return FALSE;
 
@@ -914,6 +1080,7 @@ RTMP_Connect(RTMP *r, RTMPPacket *cp)
     h = gethostbyname("localhost");
     if (!h && GetLastError() == WSAHOST_NOT_FOUND)
     {
+        r->last_error_code = WSAHOST_NOT_FOUND;
         RTMP_Log(RTMP_LOGERROR, "RTMP_Connect: Connection test failed. This error is likely caused by Comodo Internet Security running OBS in sandbox mode. Please add OBS to the Comodo automatic sandbox exclusion list, restart OBS and try again (11001).");
         return FALSE;
     }
@@ -927,14 +1094,20 @@ RTMP_Connect(RTMP *r, RTMPPacket *cp)
     if (r->Link.socksport)
     {
         /* Connect via SOCKS */
-        if (!add_addr_info(&service, &addrlen, &r->Link.sockshost, r->Link.socksport, addrlen_hint))
+        if (!add_addr_info(&service, &addrlen, &r->Link.sockshost, r->Link.socksport, addrlen_hint, &socket_error))
+        {
+            r->last_error_code = socket_error;
             return FALSE;
+        }
     }
     else
     {
         /* Connect directly */
-        if (!add_addr_info(&service, &addrlen, &r->Link.hostname, r->Link.port, addrlen_hint))
+        if (!add_addr_info(&service, &addrlen, &r->Link.hostname, r->Link.port, addrlen_hint, &socket_error))
+        {
+            r->last_error_code = socket_error;
             return FALSE;
+        }
     }
 
     if (!RTMP_Connect0(r, (struct sockaddr *)&service, addrlen))
@@ -951,9 +1124,10 @@ SocksNegotiate(RTMP *r)
     unsigned long addr;
     struct sockaddr_storage service;
     socklen_t addrlen = 0;
+    int socket_error = 0;
     memset(&service, 0, sizeof(service));
 
-    add_addr_info(&service, &addrlen, &r->Link.hostname, r->Link.port, 0);
+    add_addr_info(&service, &addrlen, &r->Link.hostname, r->Link.port, 0, &socket_error);
 
     // not doing IPv6 socks
     if (service.ss_family == AF_INET6)
@@ -1080,7 +1254,7 @@ RTMP_GetNextMediaPacket(RTMP *r, RTMPPacket *packet)
     while (!bHasMediaPacket && RTMP_IsConnected(r)
             && RTMP_ReadPacket(r, packet))
     {
-        if (!RTMPPacket_IsReady(packet))
+        if (!RTMPPacket_IsReady(packet) || !packet->m_nBodySize)
         {
             continue;
         }
@@ -1382,13 +1556,6 @@ ReadN(RTMP *r, char *buffer, int n)
         if (r->Link.protocol & RTMP_FEATURE_HTTP)
             r->m_resplen -= nBytes;
 
-#ifdef CRYPTO
-        if (r->Link.rc4keyIn)
-        {
-            RC4_encrypt(r->Link.rc4keyIn, nBytes, ptr);
-        }
-#endif
-
         n -= nBytes;
         ptr += nBytes;
     }
@@ -1400,20 +1567,7 @@ static int
 WriteN(RTMP *r, const char *buffer, int n)
 {
     const char *ptr = buffer;
-#ifdef CRYPTO
-    char *encrypted = 0;
-    char buf[RTMP_BUFFER_CACHE_SIZE];
-
-    if (r->Link.rc4keyOut)
-    {
-        if (n > (int)sizeof(buf))
-            encrypted = (char *)malloc(n);
-        else
-            encrypted = (char *)buf;
-        ptr = encrypted;
-        RC4_encrypt2(r->Link.rc4keyOut, n, buffer, ptr);
-    }
-#endif
+    struct linger l;
 
     while (n > 0)
     {
@@ -1436,6 +1590,17 @@ WriteN(RTMP *r, const char *buffer, int n)
             if (sockerr == EINTR && !RTMP_ctrlC)
                 continue;
 
+            r->last_error_code = sockerr;
+
+            // Force-close the socket. Sometimes a send() error isn't fatal, so
+            // we could end up writing an unpublish message which some services
+            // treat as a clean shutdown. We need to disable lingering too so
+            // the remote side sees an abortive shutdown (RST).
+            l.l_onoff = 1;
+            l.l_linger = 0;
+            setsockopt(r->m_sb.sb_socket, SOL_SOCKET, SO_LINGER, (char *)&l, sizeof(l));
+            RTMPSockBuf_Close(&r->m_sb);
+
             RTMP_Close(r);
             n = 1;
             break;
@@ -1447,11 +1612,6 @@ WriteN(RTMP *r, const char *buffer, int n)
         n -= nBytes;
         ptr += nBytes;
     }
-
-#ifdef CRYPTO
-    if (encrypted && encrypted != buf)
-        free(encrypted);
-#endif
 
     return n == 0;
 }
@@ -1524,6 +1684,11 @@ SendConnectPacket(RTMP *r, RTMPPacket *cp)
         enc = AMF_EncodeNamedString(enc, pend, &av_type, &av_nonprivate);
         if (!enc)
             return FALSE;
+
+        if (r->Link.customConnectEncode)
+        {
+            r->Link.customConnectEncode(&enc, pend);
+        }
     }
     if (r->Link.flashVer.av_len)
     {
@@ -2368,7 +2533,19 @@ b64enc(const unsigned char *input, int length, char *output, int maxsize)
 {
     (void)maxsize;
 
-#ifdef USE_POLARSSL
+#if defined(USE_MBEDTLS)
+    size_t osize;
+    if(mbedtls_base64_encode((unsigned char *) output, maxsize, &osize, input, length) == 0)
+    {
+        output[osize] = '\0';
+        return 1;
+    }
+    else
+    {
+        RTMP_Log(RTMP_LOGDEBUG, "%s, error", __FUNCTION__);
+        return 0;
+    }
+#elif defined(USE_POLARSSL)
     size_t buf_size = maxsize;
     if(base64_encode((unsigned char *) output, &buf_size, input, length) == 0)
     {
@@ -2427,7 +2604,20 @@ b64enc(const unsigned char *input, int length, char *output, int maxsize)
     return 1;
 }
 
-#ifdef USE_POLARSSL
+#if defined(USE_MBEDTLS)
+typedef	mbedtls_md5_context MD5_CTX;
+
+#if MBEDTLS_VERSION_NUMBER >= 0x02070000 && MBEDTLS_VERSION_MAJOR < 3
+#define MD5_Init(ctx)	mbedtls_md5_init(ctx); mbedtls_md5_starts_ret(ctx)
+#define MD5_Update(ctx,data,len)	mbedtls_md5_update_ret(ctx,(unsigned char *)data,len)
+#define MD5_Final(dig,ctx)	mbedtls_md5_finish_ret(ctx,dig); mbedtls_md5_free(ctx)
+#else
+#define MD5_Init(ctx)	mbedtls_md5_init(ctx); mbedtls_md5_starts(ctx)
+#define MD5_Update(ctx,data,len)	mbedtls_md5_update(ctx,(unsigned char *)data,len)
+#define MD5_Final(dig,ctx)	mbedtls_md5_finish(ctx,dig); mbedtls_md5_free(ctx)
+#endif
+
+#elif defined(USE_POLARSSL)
 #define MD5_CTX	md5_context
 #define MD5_Init(ctx)	md5_starts(ctx)
 #define MD5_Update(ctx,data,len)	md5_update(ctx,(unsigned char *)data,len)
@@ -2443,12 +2633,12 @@ typedef struct md5_ctx	MD5_CTX;
 static const AVal av_authmod_adobe = AVC("authmod=adobe");
 static const AVal av_authmod_llnw  = AVC("authmod=llnw");
 
-static void hexenc(unsigned char *inbuf, int len, char *dst)
+static void hexenc(unsigned char *inbuf, int len, char *dst, size_t size)
 {
     char *ptr = dst;
     while(len--)
     {
-        sprintf(ptr, "%02x", *inbuf++);
+        snprintf(ptr, size, "%02x", *inbuf++);
         ptr += 2;
     }
     *ptr = '\0';
@@ -2496,8 +2686,9 @@ PublisherAuth(RTMP *r, AVal *description)
             }
             else if(r->Link.pubUser.av_len && r->Link.pubPasswd.av_len)
             {
-                pubToken.av_val = malloc(r->Link.pubUser.av_len + av_authmod_adobe.av_len + 8);
-                pubToken.av_len = sprintf(pubToken.av_val, "?%s&user=%s",
+                size_t val_size = r->Link.pubUser.av_len + av_authmod_adobe.av_len + 8;
+                pubToken.av_val = malloc(val_size);
+                pubToken.av_len = snprintf(pubToken.av_val, val_size, "?%s&user=%s",
                                           av_authmod_adobe.av_val,
                                           r->Link.pubUser.av_val);
                 RTMP_Log(RTMP_LOGDEBUG, "%s, pubToken1: %s", __FUNCTION__, pubToken.av_val);
@@ -2597,8 +2788,9 @@ PublisherAuth(RTMP *r, AVal *description)
             RTMP_Log(RTMP_LOGDEBUG, "%s, b64(md5_2) = %s", __FUNCTION__, response);
 
             /* have all hashes, create auth token for the end of app */
-            pubToken.av_val = malloc(32 + B64INT_LEN + B64DIGEST_LEN + opaque.av_len);
-            pubToken.av_len = sprintf(pubToken.av_val,
+            size_t val_size = 32 + B64INT_LEN + B64DIGEST_LEN + opaque.av_len;
+            pubToken.av_val = malloc(val_size);
+            pubToken.av_len = snprintf(pubToken.av_val, val_size,
                                       "&challenge=%s&response=%s&opaque=%s",
                                       challenge2,
                                       response,
@@ -2665,8 +2857,9 @@ PublisherAuth(RTMP *r, AVal *description)
             }
             else if(r->Link.pubUser.av_len && r->Link.pubPasswd.av_len)
             {
-                pubToken.av_val = malloc(r->Link.pubUser.av_len + av_authmod_llnw.av_len + 8);
-                pubToken.av_len = sprintf(pubToken.av_val, "?%s&user=%s",
+                size_t val_size = r->Link.pubUser.av_len + av_authmod_llnw.av_len + 8;
+                pubToken.av_val = malloc(val_size);
+                pubToken.av_len = snprintf(pubToken.av_val, val_size, "?%s&user=%s",
                                           av_authmod_llnw.av_val,
                                           r->Link.pubUser.av_val);
                 RTMP_Log(RTMP_LOGDEBUG, "%s, pubToken1: %s", __FUNCTION__, pubToken.av_val);
@@ -2743,8 +2936,8 @@ PublisherAuth(RTMP *r, AVal *description)
 
             /* FIXME: handle case where user==NULL or nonce==NULL */
 
-            sprintf(nchex, "%08x", nc);
-            sprintf(cnonce, "%08x", rand());
+            snprintf(nchex, sizeof(nchex), "%08x", nc);
+            snprintf(cnonce, sizeof(cnonce), "%08x", rand());
 
             /* hash1 = hexenc(md5(user + ":" + realm + ":" + password)) */
             MD5_Init(&md5ctx);
@@ -2757,7 +2950,7 @@ PublisherAuth(RTMP *r, AVal *description)
             RTMP_Log(RTMP_LOGDEBUG, "%s, md5(%s:%s:%s) =>", __FUNCTION__,
                      user.av_val, realm, r->Link.pubPasswd.av_val);
             RTMP_LogHexString(RTMP_LOGDEBUG, md5sum_val, MD5_DIGEST_LENGTH);
-            hexenc(md5sum_val, MD5_DIGEST_LENGTH, hash1);
+            hexenc(md5sum_val, MD5_DIGEST_LENGTH, hash1, sizeof(hash1));
 
             /* hash2 = hexenc(md5(method + ":/" + app + "/" + appInstance)) */
             /* Extract appname + appinstance without query parameters */
@@ -2776,7 +2969,7 @@ PublisherAuth(RTMP *r, AVal *description)
             RTMP_Log(RTMP_LOGDEBUG, "%s, md5(%s:/%.*s) =>", __FUNCTION__,
                      method, apptmp.av_len, apptmp.av_val);
             RTMP_LogHexString(RTMP_LOGDEBUG, md5sum_val, MD5_DIGEST_LENGTH);
-            hexenc(md5sum_val, MD5_DIGEST_LENGTH, hash2);
+            hexenc(md5sum_val, MD5_DIGEST_LENGTH, hash2, sizeof(hash2));
 
             /* hash3 = hexenc(md5(hash1 + ":" + nonce + ":" + nchex + ":" + cnonce + ":" + qop + ":" + hash2)) */
             MD5_Init(&md5ctx);
@@ -2795,13 +2988,14 @@ PublisherAuth(RTMP *r, AVal *description)
             RTMP_Log(RTMP_LOGDEBUG, "%s, md5(%s:%s:%s:%s:%s:%s) =>", __FUNCTION__,
                      hash1, nonce.av_val, nchex, cnonce, qop, hash2);
             RTMP_LogHexString(RTMP_LOGDEBUG, md5sum_val, MD5_DIGEST_LENGTH);
-            hexenc(md5sum_val, MD5_DIGEST_LENGTH, hash3);
+            hexenc(md5sum_val, MD5_DIGEST_LENGTH, hash3, sizeof(hash3));
 
             /* pubToken = &authmod=<authmod>&user=<username>&nonce=<nonce>&cnonce=<cnonce>&nc=<nchex>&response=<hash3> */
             /* Append nonces and response to query string which already contains
              * user + authmod */
-            pubToken.av_val = malloc(64 + sizeof(authmod)-1 + user.av_len + nonce.av_len + sizeof(cnonce)-1 + sizeof(nchex)-1 + HEXHASH_LEN);
-            sprintf(pubToken.av_val,
+            size_t token_size = 64 + sizeof(authmod)-1 + user.av_len + nonce.av_len + sizeof(cnonce)-1 + sizeof(nchex)-1 + HEXHASH_LEN;
+            pubToken.av_val = malloc(token_size);
+            snprintf(pubToken.av_val, token_size,
                     "&nonce=%s&cnonce=%s&nc=%s&response=%s",
                     nonce.av_val, cnonce, nchex, hash3);
             pubToken.av_len = (int)strlen(pubToken.av_val);
@@ -2893,6 +3087,8 @@ static const AVal av_NetStream_Play_UnpublishNotify =
 static const AVal av_NetStream_Publish_Start = AVC("NetStream.Publish.Start");
 static const AVal av_NetStream_Publish_Rejected = AVC("NetStream.Publish.Rejected");
 static const AVal av_NetStream_Publish_Denied = AVC("NetStream.Publish.Denied");
+static const AVal av_NetStream_Publish_BadName = AVC("NetStream.Publish.BadName");
+
 
 /* Returns 0 for OK/Failed/error, 1 for 'Stop or Complete' */
 static int
@@ -3143,7 +3339,8 @@ HandleInvoke(RTMP *r, const char *body, unsigned int nBodySize)
                 || AVMATCH(&code, &av_NetStream_Play_StreamNotFound)
                 || AVMATCH(&code, &av_NetConnection_Connect_InvalidApp)
                 || AVMATCH(&code, &av_NetStream_Publish_Rejected)
-                || AVMATCH(&code, &av_NetStream_Publish_Denied))
+                || AVMATCH(&code, &av_NetStream_Publish_Denied)
+                || AVMATCH(&code, &av_NetStream_Publish_BadName))
         {
             r->m_stream_id = -1;
             RTMP_Close(r);
@@ -3204,6 +3401,13 @@ HandleInvoke(RTMP *r, const char *body, unsigned int nBodySize)
                 RTMP_SendPause(r, FALSE, r->m_pauseStamp);
                 r->m_pausing = 3;
             }
+        }
+
+        else
+        {
+            RTMP_Log(RTMP_LOGWARNING, "Unhandled: %s:\n%s", r->Link.tcUrl.av_val, code.av_val);
+            if (description.av_len)
+                RTMP_Log(RTMP_LOGDEBUG, "Description: %s", description.av_val);
         }
     }
     else if (AVMATCH(&method, &av_playlist_ready))
@@ -3297,23 +3501,23 @@ DumpMetaData(AMFObject *obj)
             DumpMetaData(&prop->p_vu.p_object);
             break;
         case AMF_NUMBER:
-            snprintf(str, 255, "%.2f", prop->p_vu.p_number);
+            snprintf(str, sizeof(str), "%.2f", prop->p_vu.p_number);
             break;
         case AMF_BOOLEAN:
-            snprintf(str, 255, "%s",
+            snprintf(str, sizeof(str), "%s",
                      prop->p_vu.p_number != 0. ? "TRUE" : "FALSE");
             break;
         case AMF_STRING:
-            len = snprintf(str, 255, "%.*s", prop->p_vu.p_aval.av_len,
+            len = snprintf(str, sizeof(str), "%.*s", prop->p_vu.p_aval.av_len,
                            prop->p_vu.p_aval.av_val);
             if (len >= 1 && str[len-1] == '\n')
                 str[len-1] = '\0';
             break;
         case AMF_DATE:
-            snprintf(str, 255, "timestamp:%.2f", prop->p_vu.p_number);
+            snprintf(str, sizeof(str), "timestamp:%.2f", prop->p_vu.p_number);
             break;
         default:
-            snprintf(str, 255, "INVALID TYPE 0x%02x",
+            snprintf(str, sizeof(str), "INVALID TYPE 0x%02x",
                      (unsigned char)prop->p_type);
         }
         if (str[0] && prop->p_name.av_len)
@@ -3683,7 +3887,6 @@ RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
         {
             packet->m_nBodySize = AMF_DecodeInt24(header + 3);
             packet->m_nBytesRead = 0;
-            RTMPPacket_Free(packet);
 
             if (nSize > 6)
             {
@@ -3841,69 +4044,6 @@ HandShake(RTMP *r, int FP9HandShake)
 
     /* er, totally unused? */
     (void)FP9HandShake;
-    return TRUE;
-}
-
-static int
-SHandShake(RTMP *r)
-{
-    int i;
-    char serverbuf[RTMP_SIG_SIZE + 1], *serversig = serverbuf + 1;
-    char clientsig[RTMP_SIG_SIZE];
-    uint32_t uptime;
-    int bMatch;
-
-    if (ReadN(r, serverbuf, 1) != 1)	/* 0x03 or 0x06 */
-        return FALSE;
-
-    RTMP_Log(RTMP_LOGDEBUG, "%s: Type Request  : %02X", __FUNCTION__, serverbuf[0]);
-
-    if (serverbuf[0] != 3)
-    {
-        RTMP_Log(RTMP_LOGERROR, "%s: Type unknown: client sent %02X",
-                 __FUNCTION__, serverbuf[0]);
-        return FALSE;
-    }
-
-    uptime = htonl(RTMP_GetTime());
-    memcpy(serversig, &uptime, 4);
-
-    memset(&serversig[4], 0, 4);
-#ifdef _DEBUG
-    for (i = 8; i < RTMP_SIG_SIZE; i++)
-        serversig[i] = 0xff;
-#else
-    for (i = 8; i < RTMP_SIG_SIZE; i++)
-        serversig[i] = (char)(rand() % 256);
-#endif
-
-    if (!WriteN(r, serverbuf, RTMP_SIG_SIZE + 1))
-        return FALSE;
-
-    if (ReadN(r, clientsig, RTMP_SIG_SIZE) != RTMP_SIG_SIZE)
-        return FALSE;
-
-    /* decode client response */
-
-    memcpy(&uptime, clientsig, 4);
-    uptime = ntohl(uptime);
-
-    RTMP_Log(RTMP_LOGDEBUG, "%s: Client Uptime : %d", __FUNCTION__, uptime);
-    RTMP_Log(RTMP_LOGDEBUG, "%s: Player Version: %d.%d.%d.%d", __FUNCTION__,
-             clientsig[4], clientsig[5], clientsig[6], clientsig[7]);
-
-    /* 2nd part of handshake */
-    if (!WriteN(r, clientsig, RTMP_SIG_SIZE))
-        return FALSE;
-
-    if (ReadN(r, clientsig, RTMP_SIG_SIZE) != RTMP_SIG_SIZE)
-        return FALSE;
-
-    bMatch = (memcmp(serversig, clientsig, RTMP_SIG_SIZE) == 0);
-    if (!bMatch)
-    {
-        RTMP_Log(RTMP_LOGWARNING, "%s, client signature does not match!", __FUNCTION__);
-    }
     return TRUE;
 }
 #endif
@@ -4149,12 +4289,6 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
     return TRUE;
 }
 
-int
-RTMP_Serve(RTMP *r)
-{
-    return SHandShake(r);
-}
-
 void
 RTMP_Close(RTMP *r)
 {
@@ -4279,22 +4413,6 @@ RTMP_Close(RTMP *r)
         free(r->Link.tcUrl.av_val);
         r->Link.tcUrl.av_val = NULL;
     }
-#elif defined(CRYPTO)
-    if (r->Link.dh)
-    {
-        MDH_free(r->Link.dh);
-        r->Link.dh = NULL;
-    }
-    if (r->Link.rc4keyIn)
-    {
-        RC4_free(r->Link.rc4keyIn);
-        r->Link.rc4keyIn = NULL;
-    }
-    if (r->Link.rc4keyOut)
-    {
-        RC4_free(r->Link.rc4keyOut);
-        r->Link.rc4keyOut = NULL;
-    }
 #else
     for (int idx = 0; idx < r->Link.nStreams; idx++)
     {
@@ -4326,7 +4444,7 @@ RTMPSockBuf_Fill(RTMPSockBuf *sb)
         else
 #endif
         {
-            nBytes = recv(sb->sb_socket, sb->sb_start + sb->sb_size, nBytes, 0);
+            nBytes = recv(sb->sb_socket, sb->sb_start + sb->sb_size, nBytes, MSG_NOSIGNAL);
         }
         if (nBytes > 0)
         {
@@ -4379,7 +4497,7 @@ RTMPSockBuf_Send(RTMPSockBuf *sb, const char *buf, int len)
     else
 #endif
     {
-        rc = send(sb->sb_socket, buf, len, 0);
+        rc = send(sb->sb_socket, buf, len, MSG_NOSIGNAL);
     }
     return rc;
 }
@@ -5165,13 +5283,11 @@ fail:
     return total;
 }
 
-static const AVal av_setDataFrame = AVC("@setDataFrame");
-
 int
 RTMP_Write(RTMP *r, const char *buf, int size, int streamIdx)
 {
     RTMPPacket *pkt = &r->m_write;
-    char *pend, *enc;
+    char *enc;
     int s2 = size, ret, num;
 
     pkt->m_nChannel = 0x04;	/* source channel */
@@ -5207,8 +5323,6 @@ RTMP_Write(RTMP *r, const char *buf, int size, int streamIdx)
                     !pkt->m_nTimeStamp) || pkt->m_packetType == RTMP_PACKET_TYPE_INFO)
             {
                 pkt->m_headerType = RTMP_PACKET_SIZE_LARGE;
-                if (pkt->m_packetType == RTMP_PACKET_TYPE_INFO)
-                    pkt->m_nBodySize += 16;
             }
             else
             {
@@ -5221,12 +5335,6 @@ RTMP_Write(RTMP *r, const char *buf, int size, int streamIdx)
                 return FALSE;
             }
             enc = pkt->m_body;
-            pend = enc + pkt->m_nBodySize;
-            if (pkt->m_packetType == RTMP_PACKET_TYPE_INFO)
-            {
-                enc = AMF_EncodeString(enc, pend, &av_setDataFrame);
-                pkt->m_nBytesRead = enc - pkt->m_body;
-            }
         }
         else
         {

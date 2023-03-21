@@ -1,17 +1,20 @@
 project(win-wasapi)
 
-set(win-wasapi_HEADERS
-	enum-wasapi.hpp)
+add_library(win-wasapi MODULE)
+add_library(OBS::wasapi ALIAS win-wasapi)
 
-set(win-wasapi_SOURCES
-	win-wasapi.cpp
-	enum-wasapi.cpp
-	plugin-main.cpp)
+target_sources(win-wasapi PRIVATE win-wasapi.cpp enum-wasapi.cpp
+                                  enum-wasapi.hpp plugin-main.cpp)
 
-add_library(win-wasapi MODULE
-	${win-wasapi_SOURCES}
-	${win-wasapi_HEADERS})
-target_link_libraries(win-wasapi
-	libobs)
+set(MODULE_DESCRIPTION "OBS WASAPI module")
 
-install_obs_plugin_with_data(win-wasapi data)
+configure_file(${CMAKE_SOURCE_DIR}/cmake/bundle/windows/obs-module.rc.in
+               win-wasapi.rc)
+
+target_sources(win-wasapi PRIVATE win-wasapi.rc)
+
+target_link_libraries(win-wasapi PRIVATE OBS::libobs Avrt)
+
+set_target_properties(win-wasapi PROPERTIES FOLDER "plugins")
+
+setup_plugin_target(win-wasapi)

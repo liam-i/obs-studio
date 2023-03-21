@@ -27,34 +27,44 @@
 class OBSPropertiesView;
 class OBSBasic;
 
+#include "ui_OBSBasicProperties.h"
+
 class OBSBasicProperties : public QDialog {
 	Q_OBJECT
 
 private:
-	QPointer<OBSQTDisplay> preview;
+	OBSBasic *main;
 
-	OBSBasic   *main;
-	bool       acceptClicked;
+	std::unique_ptr<Ui::OBSBasicProperties> ui;
+	bool acceptClicked;
 
-	OBSSource  source;
-	OBSSignal  removedSignal;
-	OBSSignal  renamedSignal;
-	OBSSignal  updatePropertiesSignal;
-	OBSData    oldSettings;
+	OBSSource source;
+	OBSSignal removedSignal;
+	OBSSignal renamedSignal;
+	OBSSignal updatePropertiesSignal;
+	OBSData oldSettings;
 	OBSPropertiesView *view;
 	QDialogButtonBox *buttonBox;
 	QSplitter *windowSplitter;
+
+	OBSSourceAutoRelease sourceA;
+	OBSSourceAutoRelease sourceB;
+	OBSSourceAutoRelease sourceClone;
+	bool direction = true;
 
 	static void SourceRemoved(void *data, calldata_t *params);
 	static void SourceRenamed(void *data, calldata_t *params);
 	static void UpdateProperties(void *data, calldata_t *params);
 	static void DrawPreview(void *data, uint32_t cx, uint32_t cy);
+	static void DrawTransitionPreview(void *data, uint32_t cx, uint32_t cy);
+	void UpdateCallback(void *obj, obs_data_t *settings);
 	bool ConfirmQuit();
-	int  CheckSettings();
+	int CheckSettings();
 	void Cleanup();
 
 private slots:
 	void on_buttonBox_clicked(QAbstractButton *button);
+	void AddPreviewButton();
 
 public:
 	OBSBasicProperties(QWidget *parent, OBSSource source_);
@@ -64,5 +74,12 @@ public:
 
 protected:
 	virtual void closeEvent(QCloseEvent *event) override;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+	virtual bool nativeEvent(const QByteArray &eventType, void *message,
+				 qintptr *result) override;
+#else
+	virtual bool nativeEvent(const QByteArray &eventType, void *message,
+				 long *result) override;
+#endif
 	virtual void reject() override;
 };

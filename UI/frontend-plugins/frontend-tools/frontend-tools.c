@@ -1,15 +1,12 @@
 #include <obs-module.h>
-#include "frontend-tools-config.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("frontend-tools", "en-US")
 
-#if defined(_WIN32) || defined(__APPLE__)
 void InitSceneSwitcher();
 void FreeSceneSwitcher();
-#endif
 
-#if defined(_WIN32) && BUILD_CAPTIONS
+#if defined(_WIN32)
 void InitCaptions();
 void FreeCaptions();
 #endif
@@ -17,25 +14,32 @@ void FreeCaptions();
 void InitOutputTimer();
 void FreeOutputTimer();
 
+#if defined(ENABLE_SCRIPTING)
+void InitScripts();
+void FreeScripts();
+#endif
+
 bool obs_module_load(void)
 {
-#if defined(_WIN32) || defined(__APPLE__)
-	InitSceneSwitcher();
-#endif
-#if defined(_WIN32) && BUILD_CAPTIONS
+#if defined(_WIN32)
 	InitCaptions();
 #endif
+	InitSceneSwitcher();
 	InitOutputTimer();
+#if defined(ENABLE_SCRIPTING)
+	InitScripts();
+#endif
 	return true;
 }
 
 void obs_module_unload(void)
 {
-#if defined(_WIN32) || defined(__APPLE__)
-	FreeSceneSwitcher();
-#endif
-#if defined(_WIN32) && BUILD_CAPTIONS
+#if defined(_WIN32)
 	FreeCaptions();
 #endif
+	FreeSceneSwitcher();
 	FreeOutputTimer();
+#if defined(ENABLE_SCRIPTING)
+	FreeScripts();
+#endif
 }

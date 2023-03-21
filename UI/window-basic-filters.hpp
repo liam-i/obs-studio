@@ -45,10 +45,13 @@ private:
 
 	OBSSignal removeSourceSignal;
 	OBSSignal renameSourceSignal;
+	OBSSignal updatePropertiesSignal;
 
 	inline OBSSource GetFilter(int row, bool async);
 
 	void UpdateFilters();
+	void UpdateSplitter();
+	void UpdateSplitter(bool show_splitter_frame);
 	void UpdatePropertiesView(int row, bool async);
 
 	static void OBSSourceFilterAdded(void *param, calldata_t *data);
@@ -56,6 +59,7 @@ private:
 	static void OBSSourceReordered(void *param, calldata_t *data);
 	static void SourceRemoved(void *param, calldata_t *data);
 	static void SourceRenamed(void *param, calldata_t *data);
+	static void UpdateProperties(void *data, calldata_t *params);
 	static void DrawPreview(void *data, uint32_t cx, uint32_t cy);
 
 	QMenu *CreateAddFilterPopupMenu(bool async);
@@ -65,15 +69,27 @@ private:
 
 	void CustomContextMenu(const QPoint &pos, bool async);
 	void EditItem(QListWidgetItem *item, bool async);
+	void DuplicateItem(QListWidgetItem *item);
 
 	void FilterNameEdited(QWidget *editor, QListWidget *list);
 
+	void delete_filter(OBSSource filter);
+
+	bool isAsync;
+
+	int noPreviewMargin;
+
+	bool editActive = false;
+
 private slots:
-	void AddFilter(OBSSource filter);
+	void AddFilter(OBSSource filter, bool focus = true);
 	void RemoveFilter(OBSSource filter);
 	void ReorderFilters();
 	void RenameAsyncFilter();
 	void RenameEffectFilter();
+	void DuplicateAsyncFilter();
+	void DuplicateEffectFilter();
+	void ResetFilters();
 
 	void AddFilterFromAction();
 
@@ -93,10 +109,17 @@ private slots:
 	void on_effectFilters_customContextMenuRequested(const QPoint &pos);
 	void on_effectFilters_GotFocus();
 
+	void on_actionRemoveFilter_triggered();
+	void on_actionMoveUp_triggered();
+	void on_actionMoveDown_triggered();
+
 	void AsyncFilterNameEdited(QWidget *editor,
-			QAbstractItemDelegate::EndEditHint endHint);
+				   QAbstractItemDelegate::EndEditHint endHint);
 	void EffectFilterNameEdited(QWidget *editor,
-			QAbstractItemDelegate::EndEditHint endHint);
+				    QAbstractItemDelegate::EndEditHint endHint);
+
+	void CopyFilter();
+	void PasteFilter();
 
 public:
 	OBSBasicFilters(QWidget *parent, OBSSource source_);
@@ -104,6 +127,19 @@ public:
 
 	void Init();
 
+	inline void UpdateSource(obs_source_t *target)
+	{
+		if (source == target)
+			UpdateFilters();
+	}
+
 protected:
 	virtual void closeEvent(QCloseEvent *event) override;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+	virtual bool nativeEvent(const QByteArray &eventType, void *message,
+				 qintptr *result) override;
+#else
+	virtual bool nativeEvent(const QByteArray &eventType, void *message,
+				 long *result) override;
+#endif
 };

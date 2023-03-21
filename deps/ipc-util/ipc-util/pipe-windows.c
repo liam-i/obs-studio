@@ -20,8 +20,22 @@
 
 static inline bool ipc_pipe_internal_create_events(ipc_pipe_server_t *pipe)
 {
-	pipe->ready_event = CreateEvent(NULL, false, false, NULL);
-	return !!pipe->ready_event;
+	HANDLE ready_event = CreateEvent(NULL, false, false, NULL);
+	HANDLE stop_event = CreateEvent(NULL, false, false, NULL);
+	const bool success = ready_event && stop_event;
+	if (!success) {
+		if (ready_event) {
+			CloseHandle(ready_event);
+			ready_event = NULL;
+		}
+		if (stop_event) {
+			CloseHandle(stop_event);
+			stop_event = NULL;
+		}
+	}
+	pipe->ready_event = ready_event;
+	pipe->stop_event = stop_event;
+	return success;
 }
 
 static inline void *create_full_access_security_descriptor()
@@ -47,15 +61,14 @@ error:
 }
 
 static inline bool ipc_pipe_internal_create_pipe(ipc_pipe_server_t *pipe,
-		const char *name)
+						 const char *name)
 {
 	SECURITY_ATTRIBUTES sa;
 	char new_name[512];
 	void *sd;
 	const DWORD access = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
-	const DWORD flags = PIPE_TYPE_MESSAGE     |
-	                    PIPE_READMODE_MESSAGE |
-	                    PIPE_WAIT;
+	const DWORD flags = PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE |
+			    PIPE_WAIT;
 
 	strcpy_s(new_name, sizeof(new_name), "\\\\.\\pipe\\");
 	strcat_s(new_name, sizeof(new_name), name);
@@ -70,14 +83,15 @@ static inline bool ipc_pipe_internal_create_pipe(ipc_pipe_server_t *pipe,
 	sa.bInheritHandle = false;
 
 	pipe->handle = CreateNamedPipeA(new_name, access, flags, 1,
-			IPC_PIPE_BUF_SIZE, IPC_PIPE_BUF_SIZE, 0, &sa);
+					IPC_PIPE_BUF_SIZE, IPC_PIPE_BUF_SIZE, 0,
+					&sa);
 	free(sd);
 
 	return pipe->handle != INVALID_HANDLE_VALUE;
 }
 
 static inline void ipc_pipe_internal_ensure_capacity(ipc_pipe_server_t *pipe,
-		size_t new_size)
+						     size_t new_size)
 {
 	if (pipe->capacity >= new_size) {
 		return;
@@ -88,7 +102,7 @@ static inline void ipc_pipe_internal_ensure_capacity(ipc_pipe_server_t *pipe,
 }
 
 static inline void ipc_pipe_internal_append_bytes(ipc_pipe_server_t *pipe,
-		uint8_t *bytes, size_t size)
+						  uint8_t *bytes, size_t size)
 {
 	size_t new_size = pipe->size + size;
 	ipc_pipe_internal_ensure_capacity(pipe, new_size);
@@ -113,23 +127,25 @@ static DWORD CALLBACK ipc_pipe_internal_server_thread(LPVOID param)
 		return 0;
 	}
 
+	const HANDLE handles[] = {pipe->ready_event, pipe->stop_event};
 	for (;;) {
 		DWORD bytes = 0;
 		bool success;
 
 		success = !!ReadFile(pipe->handle, buf, IPC_PIPE_BUF_SIZE, NULL,
-				&pipe->overlap);
+				     &pipe->overlap);
 		if (!success && !ipc_pipe_internal_io_pending()) {
 			break;
 		}
 
-		DWORD wait = WaitForSingleObject(pipe->ready_event, INFINITE);
+		DWORD wait = WaitForMultipleObjects(_countof(handles), handles,
+						    FALSE, INFINITE);
 		if (wait != WAIT_OBJECT_0) {
 			break;
 		}
 
 		success = !!GetOverlappedResult(pipe->handle, &pipe->overlap,
-				&bytes, true);
+						&bytes, true);
 		if (!success || !bytes) {
 			break;
 		}
@@ -138,7 +154,7 @@ static DWORD CALLBACK ipc_pipe_internal_server_thread(LPVOID param)
 
 		if (success) {
 			pipe->read_callback(pipe->param, pipe->read_data,
-					pipe->size);
+					    pipe->size);
 			pipe->size = 0;
 		}
 	}
@@ -147,16 +163,16 @@ static DWORD CALLBACK ipc_pipe_internal_server_thread(LPVOID param)
 	return 0;
 }
 
-static inline bool ipc_pipe_internal_start_server_thread(
-		ipc_pipe_server_t *pipe)
+static inline bool
+ipc_pipe_internal_start_server_thread(ipc_pipe_server_t *pipe)
 {
 	pipe->thread = CreateThread(NULL, 0, ipc_pipe_internal_server_thread,
-			pipe, 0, NULL);
+				    pipe, 0, NULL);
 	return pipe->thread != NULL;
 }
 
-static inline bool ipc_pipe_internal_wait_for_connection(
-		ipc_pipe_server_t *pipe)
+static inline bool
+ipc_pipe_internal_wait_for_connection(ipc_pipe_server_t *pipe)
 {
 	bool success;
 
@@ -166,7 +182,7 @@ static inline bool ipc_pipe_internal_wait_for_connection(
 }
 
 static inline bool ipc_pipe_internal_open_pipe(ipc_pipe_client_t *pipe,
-		const char *name)
+					       const char *name)
 {
 	DWORD mode = PIPE_READMODE_MESSAGE;
 	char new_name[512];
@@ -174,8 +190,8 @@ static inline bool ipc_pipe_internal_open_pipe(ipc_pipe_client_t *pipe,
 	strcpy_s(new_name, sizeof(new_name), "\\\\.\\pipe\\");
 	strcat_s(new_name, sizeof(new_name), name);
 
-	pipe->handle = CreateFileA(new_name, GENERIC_READ | GENERIC_WRITE,
-			0, NULL, OPEN_EXISTING, 0, NULL);
+	pipe->handle = CreateFileA(new_name, GENERIC_READ | GENERIC_WRITE, 0,
+				   NULL, OPEN_EXISTING, 0, NULL);
 	if (pipe->handle == INVALID_HANDLE_VALUE) {
 		return false;
 	}
@@ -186,7 +202,7 @@ static inline bool ipc_pipe_internal_open_pipe(ipc_pipe_client_t *pipe,
 /* ------------------------------------------------------------------------- */
 
 bool ipc_pipe_server_start(ipc_pipe_server_t *pipe, const char *name,
-		ipc_pipe_read_t read_callback, void *param)
+			   ipc_pipe_read_t read_callback, void *param)
 {
 	pipe->read_callback = read_callback;
 	pipe->param = param;
@@ -216,16 +232,19 @@ void ipc_pipe_server_free(ipc_pipe_server_t *pipe)
 	if (!pipe)
 		return;
 
-	if (pipe->thread) {
-		CancelIoEx(pipe->handle, &pipe->overlap);
-		SetEvent(pipe->ready_event);
-		WaitForSingleObject(pipe->thread, INFINITE);
-		CloseHandle(pipe->thread);
-	}
-	if (pipe->ready_event)
+	if (pipe->stop_event) {
+		if (pipe->handle) {
+			if (pipe->thread) {
+				CancelIoEx(pipe->handle, &pipe->overlap);
+				SetEvent(pipe->stop_event);
+				WaitForSingleObject(pipe->thread, INFINITE);
+				CloseHandle(pipe->thread);
+			}
+			CloseHandle(pipe->handle);
+		}
+		CloseHandle(pipe->stop_event);
 		CloseHandle(pipe->ready_event);
-	if (pipe->handle)
-		CloseHandle(pipe->handle);
+	}
 
 	free(pipe->read_data);
 	memset(pipe, 0, sizeof(*pipe));
@@ -253,7 +272,7 @@ void ipc_pipe_client_free(ipc_pipe_client_t *pipe)
 }
 
 bool ipc_pipe_client_write(ipc_pipe_client_t *pipe, const void *data,
-		size_t size)
+			   size_t size)
 {
 	DWORD bytes;
 

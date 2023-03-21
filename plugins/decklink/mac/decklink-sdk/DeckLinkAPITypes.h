@@ -1,5 +1,5 @@
 /* -LICENSE-START-
-** Copyright (c) 2016 Blackmagic Design
+** Copyright (c) 2020 Blackmagic Design
 **
 ** Permission is hereby granted, free of charge, to any person or organization
 ** obtaining a copy of the software and accompanying documentation covered by
@@ -37,6 +37,10 @@
     #endif
 #endif
 
+#ifndef BMD_PUBLIC
+	#define BMD_PUBLIC
+#endif
+
 // Type Declarations
 
 typedef int64_t BMDTimeValue;
@@ -46,7 +50,7 @@ typedef uint32_t BMDTimecodeUserBits;
 
 // Interface ID Declarations
 
-BMD_CONST REFIID IID_IDeckLinkTimecode                            = /* BC6CFBD3-8317-4325-AC1C-1216391E9340 */ {0xBC,0x6C,0xFB,0xD3,0x83,0x17,0x43,0x25,0xAC,0x1C,0x12,0x16,0x39,0x1E,0x93,0x40};
+BMD_CONST REFIID IID_IDeckLinkTimecode                            = /* BC6CFBD3-8317-4325-AC1C-1216391E9340 */ { 0xBC,0x6C,0xFB,0xD3,0x83,0x17,0x43,0x25,0xAC,0x1C,0x12,0x16,0x39,0x1E,0x93,0x40 };
 
 /* Enum BMDTimecodeFlags - Timecode flags */
 
@@ -54,13 +58,17 @@ typedef uint32_t BMDTimecodeFlags;
 enum _BMDTimecodeFlags {
     bmdTimecodeFlagDefault                                       = 0,
     bmdTimecodeIsDropFrame                                       = 1 << 0,
-    bmdTimecodeFieldMark                                         = 1 << 1
+    bmdTimecodeFieldMark                                         = 1 << 1,
+    bmdTimecodeColorFrame                                        = 1 << 2,
+    bmdTimecodeEmbedRecordingTrigger                             = 1 << 3,	// On SDI recording trigger utilises a user-bit.
+    bmdTimecodeRecordingTriggered                                = 1 << 4
 };
 
 /* Enum BMDVideoConnection - Video connection types */
 
 typedef uint32_t BMDVideoConnection;
 enum _BMDVideoConnection {
+    bmdVideoConnectionUnspecified                                = 0,
     bmdVideoConnectionSDI                                        = 1 << 0,
     bmdVideoConnectionHDMI                                       = 1 << 1,
     bmdVideoConnectionOpticalSDI                                 = 1 << 2,
@@ -90,20 +98,22 @@ enum _BMDDeckControlConnection {
     bmdDeckControlConnectionRS422Remote2                         = 1 << 1
 };
 
+#if defined(__cplusplus)
+
 // Forward Declarations
 
 class IDeckLinkTimecode;
 
 /* Interface IDeckLinkTimecode - Used for video frame timecode representation. */
 
-class IDeckLinkTimecode : public IUnknown
+class BMD_PUBLIC IDeckLinkTimecode : public IUnknown
 {
 public:
     virtual BMDTimecodeBCD GetBCD (void) = 0;
-    virtual HRESULT GetComponents (/* out */ uint8_t *hours, /* out */ uint8_t *minutes, /* out */ uint8_t *seconds, /* out */ uint8_t *frames) = 0;
-    virtual HRESULT GetString (/* out */ CFStringRef *timecode) = 0;
+    virtual HRESULT GetComponents (/* out */ uint8_t* hours, /* out */ uint8_t* minutes, /* out */ uint8_t* seconds, /* out */ uint8_t* frames) = 0;
+    virtual HRESULT GetString (/* out */ CFStringRef* timecode) = 0;
     virtual BMDTimecodeFlags GetFlags (void) = 0;
-    virtual HRESULT GetTimecodeUserBits (/* out */ BMDTimecodeUserBits *userBits) = 0;
+    virtual HRESULT GetTimecodeUserBits (/* out */ BMDTimecodeUserBits* userBits) = 0;
 
 protected:
     virtual ~IDeckLinkTimecode () {} // call Release method to drop reference count
@@ -116,5 +126,5 @@ extern "C" {
 
 }
 
-
+#endif /* defined(__cplusplus) */
 #endif /* defined(BMD_DECKLINKAPITYPES_H) */

@@ -8,8 +8,15 @@
 #include "rtmp-format-ver.h"
 #include "lookup-config.h"
 
+#include "service-specific/showroom.h"
+#include "service-specific/dacast.h"
+
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("rtmp-services", "en-US")
+MODULE_EXPORT const char *obs_module_description(void)
+{
+	return "OBS core RTMP services";
+}
 
 #define RTMP_SERVICES_LOG_STR "[rtmp-services plugin] "
 #define RTMP_SERVICES_VER_STR "rtmp-services plugin (libobs " OBS_VERSION ")"
@@ -18,6 +25,12 @@ extern struct obs_service_info rtmp_common_service;
 extern struct obs_service_info rtmp_custom_service;
 
 static update_info_t *update_info = NULL;
+static struct dstr module_name = {0};
+
+const char *get_module_name(void)
+{
+	return module_name.array;
+}
 
 static bool confirm_service_file(void *param, struct file_download_data *file)
 {
@@ -25,7 +38,7 @@ static bool confirm_service_file(void *param, struct file_download_data *file)
 		obs_data_t *data;
 		int format_version;
 
-		data = obs_data_create_from_json((char*)file->buffer.array);
+		data = obs_data_create_from_json((char *)file->buffer.array);
 		if (!data)
 			return false;
 
@@ -40,23 +53,56 @@ static bool confirm_service_file(void *param, struct file_download_data *file)
 	return true;
 }
 
+extern void init_twitch_data(void);
+extern void load_twitch_data(void);
+extern void unload_twitch_data(void);
+extern void twitch_ingests_refresh(int seconds);
+
+static void refresh_callback(void *unused, calldata_t *cd)
+{
+	int seconds = (int)calldata_int(cd, "seconds");
+	if (seconds <= 0)
+		seconds = 3;
+	if (seconds > 10)
+		seconds = 10;
+
+	twitch_ingests_refresh(seconds);
+
+	UNUSED_PARAMETER(unused);
+}
+
 bool obs_module_load(void)
 {
+	init_twitch_data();
+	init_dacast_data();
+
+	dstr_copy(&module_name, "rtmp-services plugin (libobs ");
+	dstr_cat(&module_name, obs_get_version_string());
+	dstr_cat(&module_name, ")");
+
+	proc_handler_t *ph = obs_get_proc_handler();
+	proc_handler_add(ph, "void twitch_ingests_refresh(int seconds)",
+			 refresh_callback, NULL);
+
+#if !defined(_WIN32) || defined(ENABLE_SERVICE_UPDATES)
 	char *local_dir = obs_module_file("");
 	char *cache_dir = obs_module_config_path("");
+	char update_url[128];
+	snprintf(update_url, sizeof(update_url), "%s/v%d", RTMP_SERVICES_URL,
+		 RTMP_SERVICES_FORMAT_VERSION);
 
 	if (cache_dir) {
-		update_info = update_info_create(
-				RTMP_SERVICES_LOG_STR,
-				RTMP_SERVICES_VER_STR,
-				RTMP_SERVICES_URL,
-				local_dir,
-				cache_dir,
-				confirm_service_file, NULL);
+		update_info = update_info_create(RTMP_SERVICES_LOG_STR,
+						 module_name.array, update_url,
+						 local_dir, cache_dir,
+						 confirm_service_file, NULL);
 	}
+
+	load_twitch_data();
 
 	bfree(local_dir);
 	bfree(cache_dir);
+#endif
 
 	obs_register_service(&rtmp_common_service);
 	obs_register_service(&rtmp_custom_service);
@@ -66,4 +112,8 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
 	update_info_destroy(update_info);
+	unload_twitch_data();
+	free_showroom_data();
+	unload_dacast_data();
+	dstr_free(&module_name);
 }

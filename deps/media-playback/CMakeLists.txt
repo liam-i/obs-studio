@@ -1,36 +1,29 @@
 project(media-playback)
 
-find_package(FFmpeg REQUIRED
-	COMPONENTS avcodec avdevice avutil avformat)
+option(ENABLE_SIMDE "Enable non-native SSE2 SIMD support" ON)
 
-include_directories(
-	${CMAKE_SOURCE_DIR}/libobs
-	${FFMPEG_INCLUDE_DIRS}
-	)
+find_package(FFmpeg REQUIRED COMPONENTS avcodec avdevice avutil avformat)
 
-set(media-playback_HEADERS
-	media-playback/decode.h
-	media-playback/media.h
-	)
-set(media-playback_SOURCES
-	media-playback/decode.c
-	media-playback/media.c
-	)
+add_library(media-playback INTERFACE)
+add_library(OBS::media-playback ALIAS media-playback)
 
-add_library(media-playback STATIC
-	${media-playback_HEADERS}
-	${media-playback_SOURCES}
-	)
-target_include_directories(media-playback
-	PUBLIC .
-	)
+target_sources(
+  media-playback
+  INTERFACE media-playback/media.c
+            media-playback/media.h
+            media-playback/cache.c
+            media-playback/cache.h
+            media-playback/decode.c
+            media-playback/decode.h
+            media-playback/media-playback.c
+            media-playback/media-playback.h
+            media-playback/closest-format.h)
 
-if(NOT MSVC)
-        if(NOT MINGW)
-                target_compile_options(media-playback PRIVATE -fPIC)
-        endif()
-endif()
+target_link_libraries(media-playback INTERFACE FFmpeg::avcodec FFmpeg::avdevice
+                                               FFmpeg::avutil FFmpeg::avformat)
 
-target_link_libraries(media-playback
-	${FFMPEG_LIBRARIES}
-	)
+target_include_directories(media-playback INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+
+target_compile_options(media-playback INTERFACE ${ARCH_SIMD_FLAGS})
+
+target_compile_definitions(media-playback INTERFACE ${ARCH_SIMD_DEFINES})

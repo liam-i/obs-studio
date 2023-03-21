@@ -1,26 +1,24 @@
-project(ffmpeg-mux)
+project(obs-ffmpeg-mux)
 
-find_package(FFmpeg REQUIRED
-	COMPONENTS avcodec avutil avformat)
-include_directories(${FFMPEG_INCLUDE_DIRS})
+option(ENABLE_FFMPEG_MUX_DEBUG "Enable FFmpeg-mux debugging" OFF)
 
-set(ffmpeg-mux_SOURCES
-	ffmpeg-mux.c)
+find_package(FFmpeg REQUIRED COMPONENTS avcodec avutil avformat)
 
-set(ffmpeg-mux_HEADERS
-	ffmpeg-mux.h)
+add_executable(obs-ffmpeg-mux)
+add_executable(OBS::ffmpeg-mux ALIAS obs-ffmpeg-mux)
 
-add_executable(ffmpeg-mux
-	${ffmpeg-mux_SOURCES}
-	${ffmpeg-mux_HEADERS})
+target_sources(obs-ffmpeg-mux PRIVATE ffmpeg-mux.c ffmpeg-mux.h)
 
-target_link_libraries(ffmpeg-mux
-	${FFMPEG_LIBRARIES})
-
-if(WIN32)
-	set_target_properties(ffmpeg-mux
-		PROPERTIES
-			OUTPUT_NAME "ffmpeg-mux${_output_suffix}")
+target_link_libraries(obs-ffmpeg-mux PRIVATE OBS::libobs FFmpeg::avcodec
+                                             FFmpeg::avutil FFmpeg::avformat)
+if(OS_WINDOWS)
+  target_link_libraries(obs-ffmpeg-mux PRIVATE OBS::w32-pthreads)
 endif()
 
-install_obs_datatarget(ffmpeg-mux "obs-plugins/obs-ffmpeg")
+if(ENABLE_FFMPEG_MUX_DEBUG)
+  target_compile_definitions(obs-ffmpeg-mux PRIVATE ENABLE_FFMPEG_MUX_DEBUG)
+endif()
+
+set_target_properties(obs-ffmpeg-mux PROPERTIES FOLDER "plugins/obs-ffmpeg")
+
+setup_binary_target(obs-ffmpeg-mux)

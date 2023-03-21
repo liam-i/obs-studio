@@ -48,12 +48,24 @@ static float mix_b(void *data, float t)
 }
 
 static bool cut_audio_render(void *data, uint64_t *ts_out,
-		struct obs_source_audio_mix *audio, uint32_t mixers,
-		size_t channels, size_t sample_rate)
+			     struct obs_source_audio_mix *audio,
+			     uint32_t mixers, size_t channels,
+			     size_t sample_rate)
 {
 	struct cut_info *cut = data;
-	return obs_transition_audio_render(cut->source, ts_out,
-		audio, mixers, channels, sample_rate, mix_a, mix_b);
+	return obs_transition_audio_render(cut->source, ts_out, audio, mixers,
+					   channels, sample_rate, mix_a, mix_b);
+}
+
+static enum gs_color_space
+cut_video_get_color_space(void *data, size_t count,
+			  const enum gs_color_space *preferred_spaces)
+{
+	UNUSED_PARAMETER(count);
+	UNUSED_PARAMETER(preferred_spaces);
+
+	struct cut_info *const cut = data;
+	return obs_transition_video_get_color_space(cut->source);
 }
 
 struct obs_source_info cut_transition = {
@@ -64,4 +76,5 @@ struct obs_source_info cut_transition = {
 	.destroy = cut_destroy,
 	.video_render = cut_video_render,
 	.audio_render = cut_audio_render,
+	.video_get_color_space = cut_video_get_color_space,
 };

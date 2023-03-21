@@ -1,101 +1,160 @@
 #include <d3d10_1.h>
 #include <d3d11.h>
-#include <dxgi.h>
+#include <dxgi1_2.h>
 #include <d3dcompiler.h>
+#include <inttypes.h>
 
-#include "d3d1x_shaders.hpp"
 #include "graphics-hook.h"
-#include "../funchook.h"
+
+#include <detours.h>
 
 #if COMPILE_D3D12_HOOK
 #include <d3d12.h>
 #endif
 
-typedef HRESULT (STDMETHODCALLTYPE *resize_buffers_t)(IDXGISwapChain*, UINT,
-		UINT, UINT, DXGI_FORMAT, UINT);
-typedef HRESULT (STDMETHODCALLTYPE *present_t)(IDXGISwapChain*, UINT, UINT);
+typedef ULONG(STDMETHODCALLTYPE *release_t)(IUnknown *);
+typedef HRESULT(STDMETHODCALLTYPE *resize_buffers_t)(IDXGISwapChain *, UINT,
+						     UINT, UINT, DXGI_FORMAT,
+						     UINT);
+typedef HRESULT(STDMETHODCALLTYPE *present_t)(IDXGISwapChain *, UINT, UINT);
+typedef HRESULT(STDMETHODCALLTYPE *present1_t)(IDXGISwapChain1 *, UINT, UINT,
+					       const DXGI_PRESENT_PARAMETERS *);
 
-static struct func_hook resize_buffers;
-static struct func_hook present;
+release_t RealRelease = nullptr;
+resize_buffers_t RealResizeBuffers = nullptr;
+present_t RealPresent = nullptr;
+present1_t RealPresent1 = nullptr;
+
+thread_local int dxgi_presenting = 0;
+struct ID3D12CommandQueue *dxgi_possible_swap_queues[8]{};
+size_t dxgi_possible_swap_queue_count;
+bool dxgi_present_attempted = false;
 
 struct dxgi_swap_data {
 	IDXGISwapChain *swap;
-	void (*capture)(void*, void*, bool);
+	void (*capture)(void *, void *);
 	void (*free)(void);
 };
 
 static struct dxgi_swap_data data = {};
+static int swap_chain_mismatch_count = 0;
+constexpr int swap_chain_mismtach_limit = 16;
 
 static bool setup_dxgi(IDXGISwapChain *swap)
 {
-	const char *process_name = get_process_name();
-	bool ignore_d3d10 = false;
 	IUnknown *device;
 	HRESULT hr;
 
-	/* Call of duty ghosts allows the context to be queried as a d3d10
-	 * context when it's actually a d3d11 context.  Why this is I don't
-	 * quite know. */
-	if (_strcmpi(process_name, "iw6sp64_ship.exe") == 0 ||
-	    _strcmpi(process_name, "iw6mp64_ship.exe") == 0 ||
-	    _strcmpi(process_name, "justcause3.exe") == 0 ||
-	    _strcmpi(process_name, "theHunterCotW_F.exe") == 0) {
-		ignore_d3d10 = true;
-	}
+	hr = swap->GetDevice(__uuidof(ID3D11Device), (void **)&device);
+	if (SUCCEEDED(hr)) {
+		ID3D11Device *d3d11 = static_cast<ID3D11Device *>(device);
+		D3D_FEATURE_LEVEL level = d3d11->GetFeatureLevel();
+		device->Release();
 
-	if (!ignore_d3d10) {
-		hr = swap->GetDevice(__uuidof(ID3D10Device), (void**)&device);
-		if (SUCCEEDED(hr)) {
+		if (level >= D3D_FEATURE_LEVEL_11_0) {
+			hlog("Found D3D11 11.0 device on swap chain");
+
 			data.swap = swap;
-			data.capture = d3d10_capture;
-			data.free = d3d10_free;
-			device->Release();
+			data.capture = d3d11_capture;
+			data.free = d3d11_free;
 			return true;
 		}
 	}
 
-	hr = swap->GetDevice(__uuidof(ID3D11Device), (void**)&device);
+	hr = swap->GetDevice(__uuidof(ID3D10Device), (void **)&device);
 	if (SUCCEEDED(hr)) {
+		device->Release();
+
+		hlog("Found D3D10 device on swap chain");
+
+		data.swap = swap;
+		data.capture = d3d10_capture;
+		data.free = d3d10_free;
+		return true;
+	}
+
+	hr = swap->GetDevice(__uuidof(ID3D11Device), (void **)&device);
+	if (SUCCEEDED(hr)) {
+		device->Release();
+
+		hlog("Found D3D11 device on swap chain");
+
 		data.swap = swap;
 		data.capture = d3d11_capture;
 		data.free = d3d11_free;
-		device->Release();
 		return true;
 	}
 
 #if COMPILE_D3D12_HOOK
-	hr = swap->GetDevice(__uuidof(ID3D12Device), (void**)&device);
+	hr = swap->GetDevice(__uuidof(ID3D12Device), (void **)&device);
 	if (SUCCEEDED(hr)) {
-		data.swap = swap;
-		data.capture = d3d12_capture;
-		data.free = d3d12_free;
 		device->Release();
-		return true;
+
+		hlog("Found D3D12 device on swap chain: swap=0x%" PRIX64
+		     ", device=0x%" PRIX64,
+		     (uint64_t)(uintptr_t)swap, (uint64_t)(uintptr_t)device);
+		for (size_t i = 0; i < dxgi_possible_swap_queue_count; ++i) {
+			hlog("    queue=0x%" PRIX64,
+			     (uint64_t)(uintptr_t)dxgi_possible_swap_queues[i]);
+		}
+
+		if (dxgi_possible_swap_queue_count > 0) {
+			data.swap = swap;
+			data.capture = d3d12_capture;
+			data.free = d3d12_free;
+			return true;
+		}
 	}
 #endif
 
+	hlog_verbose("Failed to setup DXGI");
 	return false;
+}
+
+static ULONG STDMETHODCALLTYPE hook_release(IUnknown *unknown)
+{
+	const ULONG refs = RealRelease(unknown);
+
+	hlog_verbose("Release callback: Refs=%lu", refs);
+	if (unknown == data.swap && refs == 0) {
+		hlog_verbose("No more refs, so reset capture");
+
+		data.swap = nullptr;
+		data.capture = nullptr;
+		memset(dxgi_possible_swap_queues, 0,
+		       sizeof(dxgi_possible_swap_queues));
+		dxgi_possible_swap_queue_count = 0;
+		dxgi_present_attempted = false;
+
+		data.free();
+		data.free = nullptr;
+	}
+
+	return refs;
 }
 
 static bool resize_buffers_called = false;
 
 static HRESULT STDMETHODCALLTYPE hook_resize_buffers(IDXGISwapChain *swap,
-		UINT buffer_count, UINT width, UINT height, DXGI_FORMAT format,
-		UINT flags)
+						     UINT buffer_count,
+						     UINT width, UINT height,
+						     DXGI_FORMAT format,
+						     UINT flags)
 {
-	HRESULT hr;
-
-	if (!!data.free)
-		data.free();
+	hlog_verbose("ResizeBuffers callback");
 
 	data.swap = nullptr;
-	data.free = nullptr;
 	data.capture = nullptr;
+	memset(dxgi_possible_swap_queues, 0, sizeof(dxgi_possible_swap_queues));
+	dxgi_possible_swap_queue_count = 0;
+	dxgi_present_attempted = false;
 
-	unhook(&resize_buffers);
-	resize_buffers_t call = (resize_buffers_t)resize_buffers.call_addr;
-	hr = call(swap, buffer_count, width, height, format, flags);
-	rehook(&resize_buffers);
+	if (data.free)
+		data.free();
+	data.free = nullptr;
+
+	const HRESULT hr = RealResizeBuffers(swap, buffer_count, width, height,
+					     format, flags);
 
 	resize_buffers_called = true;
 
@@ -104,43 +163,77 @@ static HRESULT STDMETHODCALLTYPE hook_resize_buffers(IDXGISwapChain *swap,
 
 static inline IUnknown *get_dxgi_backbuffer(IDXGISwapChain *swap)
 {
-	IDXGIResource *res = nullptr;
-	HRESULT hr;
+	IUnknown *res = nullptr;
 
-	hr = swap->GetBuffer(0, __uuidof(IUnknown), (void**)&res);
+	const HRESULT hr = swap->GetBuffer(0, IID_PPV_ARGS(&res));
 	if (FAILED(hr))
 		hlog_hr("get_dxgi_backbuffer: GetBuffer failed", hr);
 
 	return res;
 }
 
-static HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain *swap,
-		UINT sync_interval, UINT flags)
+static void update_mismatch_count(bool match)
 {
-	IUnknown *backbuffer = nullptr;
-	bool capture_overlay = global_hook_info->capture_overlay;
-	bool test_draw = (flags & DXGI_PRESENT_TEST) != 0;
-	bool capture;
-	HRESULT hr;
+	if (match) {
+		swap_chain_mismatch_count = 0;
+	} else {
+		++swap_chain_mismatch_count;
+
+		if (swap_chain_mismatch_count == swap_chain_mismtach_limit) {
+			data.swap = nullptr;
+			data.capture = nullptr;
+			memset(dxgi_possible_swap_queues, 0,
+			       sizeof(dxgi_possible_swap_queues));
+			dxgi_possible_swap_queue_count = 0;
+			dxgi_present_attempted = false;
+
+			data.free();
+			data.free = nullptr;
+
+			swap_chain_mismatch_count = 0;
+		}
+	}
+}
+
+static HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain *swap,
+					      UINT sync_interval, UINT flags)
+{
+	if (should_passthrough()) {
+		dxgi_presenting = true;
+		const HRESULT hr = RealPresent(swap, sync_interval, flags);
+		dxgi_presenting = false;
+		return hr;
+	}
+
+	const bool capture_overlay = global_hook_info->capture_overlay;
+	const bool test_draw = (flags & DXGI_PRESENT_TEST) != 0;
+
+	if (data.swap) {
+		update_mismatch_count(swap == data.swap);
+	}
 
 	if (!data.swap && !capture_active()) {
 		setup_dxgi(swap);
 	}
 
-	capture = !test_draw && swap == data.swap && !!data.capture;
+	hlog_verbose(
+		"Present callback: sync_interval=%u, flags=%u, current_swap=0x%" PRIX64
+		", expected_swap=0x%" PRIX64,
+		sync_interval, flags, swap, data.swap);
+	const bool capture = !test_draw && swap == data.swap && data.capture;
 	if (capture && !capture_overlay) {
-		backbuffer = get_dxgi_backbuffer(swap);
+		IUnknown *backbuffer = get_dxgi_backbuffer(swap);
 
-		if (!!backbuffer) {
-			data.capture(swap, backbuffer, capture_overlay);
+		if (backbuffer) {
+			data.capture(swap, backbuffer);
 			backbuffer->Release();
 		}
 	}
 
-	unhook(&present);
-	present_t call = (present_t)present.call_addr;
-	hr = call(swap, sync_interval, flags);
-	rehook(&present);
+	++dxgi_presenting;
+	const HRESULT hr = RealPresent(swap, sync_interval, flags);
+	--dxgi_presenting;
+	dxgi_present_attempted = true;
 
 	if (capture && capture_overlay) {
 		/*
@@ -153,10 +246,10 @@ static HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain *swap,
 		if (resize_buffers_called) {
 			resize_buffers_called = false;
 		} else {
-			backbuffer = get_dxgi_backbuffer(swap);
+			IUnknown *backbuffer = get_dxgi_backbuffer(swap);
 
-			if (!!backbuffer) {
-				data.capture(swap, backbuffer, capture_overlay);
+			if (backbuffer) {
+				data.capture(swap, backbuffer);
 				backbuffer->Release();
 			}
 		}
@@ -165,113 +258,122 @@ static HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain *swap,
 	return hr;
 }
 
-static pD3DCompile get_compiler(void)
+static HRESULT STDMETHODCALLTYPE
+hook_present1(IDXGISwapChain1 *swap, UINT sync_interval, UINT flags,
+	      const DXGI_PRESENT_PARAMETERS *params)
 {
-	pD3DCompile compile = nullptr;
-	char d3dcompiler[40] = {};
-	int ver = 49;
-
-	while (ver > 30) {
-		sprintf_s(d3dcompiler, 40, "D3DCompiler_%02d.dll", ver);
-
-		HMODULE module = LoadLibraryA(d3dcompiler);
-		if (module) {
-			compile = (pD3DCompile)GetProcAddress(module,
-					"D3DCompile");
-			if (compile) {
-				break;
-			}
-		}
-
-		ver--;
+	if (should_passthrough()) {
+		dxgi_presenting = true;
+		const HRESULT hr =
+			RealPresent1(swap, sync_interval, flags, params);
+		dxgi_presenting = false;
+		return hr;
 	}
 
-	return compile;
-}
+	const bool capture_overlay = global_hook_info->capture_overlay;
+	const bool test_draw = (flags & DXGI_PRESENT_TEST) != 0;
 
-static uint8_t vertex_shader_data[1024];
-static uint8_t pixel_shader_data[1024];
-static size_t vertex_shader_size = 0;
-static size_t pixel_shader_size = 0;
+	if (data.swap) {
+		update_mismatch_count(swap == data.swap);
+	}
+
+	if (!data.swap && !capture_active()) {
+		setup_dxgi(swap);
+	}
+
+	hlog_verbose(
+		"Present1 callback: sync_interval=%u, flags=%u, current_swap=0x%" PRIX64
+		", expected_swap=0x%" PRIX64,
+		sync_interval, flags, swap, data.swap);
+	const bool capture = !test_draw && swap == data.swap && !!data.capture;
+	if (capture && !capture_overlay) {
+		IUnknown *backbuffer = get_dxgi_backbuffer(swap);
+
+		if (backbuffer) {
+			data.capture(swap, backbuffer);
+			backbuffer->Release();
+		}
+	}
+
+	++dxgi_presenting;
+	const HRESULT hr = RealPresent1(swap, sync_interval, flags, params);
+	--dxgi_presenting;
+	dxgi_present_attempted = true;
+
+	if (capture && capture_overlay) {
+		if (resize_buffers_called) {
+			resize_buffers_called = false;
+		} else {
+			IUnknown *backbuffer = get_dxgi_backbuffer(swap);
+
+			if (backbuffer) {
+				data.capture(swap, backbuffer);
+				backbuffer->Release();
+			}
+		}
+	}
+
+	return hr;
+}
 
 bool hook_dxgi(void)
 {
-	pD3DCompile compile;
-	ID3D10Blob *blob;
 	HMODULE dxgi_module = get_system_module("dxgi.dll");
-	HRESULT hr;
-	void *present_addr;
-	void *resize_addr;
-
 	if (!dxgi_module) {
+		hlog_verbose("Failed to find dxgi.dll. Skipping hook attempt.");
 		return false;
 	}
 
-	compile = get_compiler();
-	if (!compile) {
-		hlog("hook_dxgi: failed to find d3d compiler library");
-		return true;
-	}
-
 	/* ---------------------- */
 
-	hr = compile(vertex_shader_string, sizeof(vertex_shader_string),
-			"vertex_shader_string", nullptr, nullptr, "main",
-			"vs_4_0", D3D10_SHADER_OPTIMIZATION_LEVEL1, 0, &blob,
-			nullptr);
-	if (FAILED(hr)) {
-		hlog_hr("hook_dxgi: failed to compile vertex shader", hr);
-		return true;
+	void *present_addr = get_offset_addr(
+		dxgi_module, global_hook_info->offsets.dxgi.present);
+	void *resize_addr = get_offset_addr(
+		dxgi_module, global_hook_info->offsets.dxgi.resize);
+	void *present1_addr = nullptr;
+	if (global_hook_info->offsets.dxgi.present1)
+		present1_addr = get_offset_addr(
+			dxgi_module, global_hook_info->offsets.dxgi.present1);
+	void *release_addr = nullptr;
+	if (global_hook_info->offsets.dxgi2.release)
+		release_addr = get_offset_addr(
+			dxgi_module, global_hook_info->offsets.dxgi2.release);
+
+	DetourTransactionBegin();
+
+	RealPresent = (present_t)present_addr;
+	DetourAttach(&(PVOID &)RealPresent, hook_present);
+
+	RealResizeBuffers = (resize_buffers_t)resize_addr;
+	DetourAttach(&(PVOID &)RealResizeBuffers, hook_resize_buffers);
+
+	if (present1_addr) {
+		RealPresent1 = (present1_t)present1_addr;
+		DetourAttach(&(PVOID &)RealPresent1, hook_present1);
 	}
 
-	vertex_shader_size = (size_t)blob->GetBufferSize();
-	memcpy(vertex_shader_data, blob->GetBufferPointer(),
-			blob->GetBufferSize());
-	blob->Release();
-
-	/* ---------------------- */
-
-	hr = compile(pixel_shader_string, sizeof(pixel_shader_string),
-			"pixel_shader_string", nullptr, nullptr, "main",
-			"ps_4_0", D3D10_SHADER_OPTIMIZATION_LEVEL1, 0, &blob,
-			nullptr);
-	if (FAILED(hr)) {
-		hlog_hr("hook_dxgi: failed to compile pixel shader", hr);
-		return true;
+	if (release_addr) {
+		RealRelease = (release_t)release_addr;
+		DetourAttach(&(PVOID &)RealRelease, hook_release);
 	}
 
-	pixel_shader_size = (size_t)blob->GetBufferSize();
-	memcpy(pixel_shader_data, blob->GetBufferPointer(),
-			blob->GetBufferSize());
-	blob->Release();
+	const LONG error = DetourTransactionCommit();
+	const bool success = error == NO_ERROR;
+	if (success) {
+		hlog("Hooked IDXGISwapChain::Present");
+		hlog("Hooked IDXGISwapChain::ResizeBuffers");
+		if (RealPresent1)
+			hlog("Hooked IDXGISwapChain1::Present1");
+		if (RealRelease)
+			hlog("Hooked IDXGISwapChain::Release");
+		hlog("Hooked DXGI");
+	} else {
+		RealPresent = nullptr;
+		RealResizeBuffers = nullptr;
+		RealPresent1 = nullptr;
+		RealRelease = nullptr;
+		hlog("Failed to attach Detours hook: %ld", error);
+	}
 
-	/* ---------------------- */
-
-	present_addr = get_offset_addr(dxgi_module,
-			global_hook_info->offsets.dxgi.present);
-	resize_addr = get_offset_addr(dxgi_module,
-			global_hook_info->offsets.dxgi.resize);
-
-	hook_init(&present, present_addr, (void*)hook_present,
-			"IDXGISwapChain::Present");
-	hook_init(&resize_buffers, resize_addr, (void*)hook_resize_buffers,
-			"IDXGISwapChain::ResizeBuffers");
-
-	rehook(&resize_buffers);
-	rehook(&present);
-
-	hlog("Hooked DXGI");
-	return true;
-}
-
-uint8_t *get_d3d1x_vertex_shader(size_t *size)
-{
-	*size = vertex_shader_size;
-	return vertex_shader_data;
-}
-
-uint8_t *get_d3d1x_pixel_shader(size_t *size)
-{
-	*size = pixel_shader_size;
-	return pixel_shader_data;
+	return success;
 }
