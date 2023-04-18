@@ -20,6 +20,9 @@
 #include <QApplication>
 #include <QTranslator>
 #include <QPointer>
+#ifndef _WIN32
+#include <QSocketNotifier>
+#endif
 #include <obs.hpp>
 #include <util/lexer.h>
 #include <util/profiler.h>
@@ -42,8 +45,9 @@ std::string GenerateSpecifiedFilename(const char *extension, bool noSpace,
 				      const char *format);
 std::string GetFormatString(const char *format, const char *prefix,
 			    const char *suffix);
-std::string GetOutputFilename(const char *path, const char *ext, bool noSpace,
-			      bool overwrite, const char *format);
+std::string GetFormatExt(const char *container);
+std::string GetOutputFilename(const char *path, const char *container,
+			      bool noSpace, bool overwrite, const char *format);
 QObject *CreateShortcutFilter();
 
 struct BaseLexer {
@@ -124,6 +128,11 @@ private:
 				uint32_t color);
 
 	bool notify(QObject *receiver, QEvent *e) override;
+
+#ifndef _WIN32
+	static int sigintFd[2];
+	QSocketNotifier *snInt = nullptr;
+#endif
 
 public:
 	OBSApp(int &argc, char **argv, profiler_name_store_t *store);
@@ -208,9 +217,13 @@ public:
 	}
 
 	inline void PopUITranslation() { translatorHooks.pop_front(); }
+#ifndef _WIN32
+	static void SigIntSignalHandler(int);
+#endif
 
 public slots:
 	void Exec(VoidFunc func);
+	void ProcessSigInt();
 
 signals:
 	void StyleChanged();

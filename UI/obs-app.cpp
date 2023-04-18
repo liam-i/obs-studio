@@ -59,6 +59,9 @@
 #else
 #include <signal.h>
 #include <pthread.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #endif
 
 #if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER)
@@ -107,6 +110,10 @@ string opt_starting_scene;
 bool restart = false;
 
 QPointer<OBSLogViewer> obsLogViewer;
+
+#ifndef _WIN32
+int OBSApp::sigintFd[2];
+#endif
 
 // GPU hint exports for AMD/NVIDIA laptops
 #ifdef _MSC_VER
@@ -403,8 +410,12 @@ static void do_log(int log_level, const char *msg, va_list args, void *param)
 	}
 #endif
 
+#if !defined(_WIN32) && defined(_DEBUG)
+	def_log_handler(log_level, msg, args2, nullptr);
+#endif
+
 	if (log_level <= LOG_INFO || log_verbose) {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(_DEBUG)
 		def_log_handler(log_level, msg, args2, nullptr);
 #endif
 		if (!too_many_repeated_entries(logFile, msg, str))
@@ -1201,13 +1212,12 @@ std::string OBSApp::GetTheme(std::string name, std::string path)
 
 std::string OBSApp::SetParentTheme(std::string name)
 {
-	string path = GetTheme(name.c_str(), "");
+	string path = GetTheme(name, "");
 	if (path.empty())
 		return path;
 
 	setPalette(defaultPalette);
 
-	QString mpath = QString("file:///") + path.c_str();
 	ParseExtraThemeData(path.c_str());
 	return path;
 }
@@ -1391,6 +1401,14 @@ OBSApp::OBSApp(int &argc, char **argv, profiler_name_store_t *store)
 		blog(LOG_WARNING, "Failed to set LC_NUMERIC to C locale");
 #endif
 
+#ifndef _WIN32
+	/* Handle SIGINT properly */
+	socketpair(AF_UNIX, SOCK_STREAM, 0, sigintFd);
+	snInt = new QSocketNotifier(sigintFd[1], QSocketNotifier::Read, this);
+	connect(snInt, SIGNAL(activated(QSocketDescriptor)), this,
+		SLOT(ProcessSigInt()));
+#endif
+
 	sleepInhibitor = os_inhibit_sleep_create("OBS Video/audio");
 
 #ifndef __APPLE__
@@ -1407,6 +1425,10 @@ OBSApp::~OBSApp()
 		config_get_bool(globalConfig, "Audio", "DisableAudioDucking");
 	if (disableAudioDucking)
 		DisableAudioDucking(false);
+#else
+	delete snInt;
+	close(sigintFd[0]);
+	close(sigintFd[1]);
 #endif
 
 #ifdef __APPLE__
@@ -1731,6 +1753,11 @@ string OBSApp::GetVersionString(bool platform) const
 	if (platform) {
 		ver << " (";
 #ifdef _WIN32
+		if (sizeof(void *) == 8)
+			ver << "64-bit, ";
+		else
+			ver << "32-bit, ";
+
 		ver << "windows)";
 #elif __APPLE__
 		ver << "mac)";
@@ -1845,8 +1872,8 @@ skip:
 	return QApplication::notify(receiver, e);
 }
 
-QString OBSTranslator::translate(const char *context, const char *sourceText,
-				 const char *disambiguation, int n) const
+QString OBSTranslator::translate(const char *, const char *sourceText,
+				 const char *, int) const
 {
 	const char *out = nullptr;
 	QString str(sourceText);
@@ -1854,9 +1881,6 @@ QString OBSTranslator::translate(const char *context, const char *sourceText,
 	if (!App()->TranslateString(QT_TO_UTF8(str), &out))
 		return QString(sourceText);
 
-	UNUSED_PARAMETER(context);
-	UNUSED_PARAMETER(disambiguation);
-	UNUSED_PARAMETER(n);
 	return QT_UTF8(out);
 }
 
@@ -2105,7 +2129,22 @@ string GetFormatString(const char *format, const char *prefix,
 	return f;
 }
 
-string GetOutputFilename(const char *path, const char *ext, bool noSpace,
+string GetFormatExt(const char *container)
+{
+	string ext = container;
+	if (ext == "fragmented_mp4")
+		ext = "mp4";
+	else if (ext == "fragmented_mov")
+		ext = "mov";
+	else if (ext == "hls")
+		ext = "m3u8";
+	else if (ext == "mpegts")
+		ext = "ts";
+
+	return ext;
+}
+
+string GetOutputFilename(const char *path, const char *container, bool noSpace,
 			 bool overwrite, const char *format)
 {
 	OBSBasic *main = reinterpret_cast<OBSBasic *>(App()->GetMainWindow());
@@ -2132,7 +2171,8 @@ string GetOutputFilename(const char *path, const char *ext, bool noSpace,
 	if (lastChar != '/' && lastChar != '\\')
 		strPath += "/";
 
-	strPath += GenerateSpecifiedFilename(ext, noSpace, format);
+	string ext = GetFormatExt(container);
+	strPath += GenerateSpecifiedFilename(ext.c_str(), noSpace, format);
 	ensure_directory_exists(strPath);
 	if (!overwrite)
 		FindBestFilename(strPath, noSpace);
@@ -2503,7 +2543,8 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 	"Woops, OBS has crashed!\n\nWould you like to copy the crash log " \
 	"to the clipboard? The crash log will still be saved to:\n\n%s"
 
-static void main_crash_handler(const char *format, va_list args, void *param)
+static void main_crash_handler(const char *format, va_list args,
+			       void * /* param */)
 {
 	char *text = new char[MAX_CRASH_REPORT_SIZE];
 
@@ -2569,8 +2610,6 @@ static void main_crash_handler(const char *format, va_list args, void *param)
 	}
 
 	exit(-1);
-
-	UNUSED_PARAMETER(param);
 }
 
 static void load_debug_privilege(void)
@@ -3176,12 +3215,31 @@ static void upgrade_settings(void)
 	os_closedir(dir);
 }
 
-void ctrlc_handler(int s)
+#ifndef _WIN32
+void OBSApp::SigIntSignalHandler(int s)
 {
+	/* Handles SIGINT and writes to a socket. Qt will read
+	 * from the socket in the main thread event loop and trigger
+	 * a call to the ProcessSigInt slot, where we can safely run
+	 * shutdown code without signal safety issues. */
 	UNUSED_PARAMETER(s);
 
-	OBSBasic *main = reinterpret_cast<OBSBasic *>(App()->GetMainWindow());
+	char a = 1;
+	send(sigintFd[0], &a, sizeof(a), 0);
+}
+#endif
+
+void OBSApp::ProcessSigInt(void)
+{
+	/* This looks weird, but we can't ifdef a Qt slot function so
+	 * the SIGINT handler simply does nothing on Windows. */
+#ifndef _WIN32
+	char tmp;
+	recv(sigintFd[1], &tmp, sizeof(tmp), 0);
+
+	OBSBasic *main = reinterpret_cast<OBSBasic *>(GetMainWindow());
 	main->close();
+#endif
 }
 
 int main(int argc, char *argv[])
@@ -3191,7 +3249,7 @@ int main(int argc, char *argv[])
 
 	struct sigaction sig_handler;
 
-	sig_handler.sa_handler = ctrlc_handler;
+	sig_handler.sa_handler = OBSApp::SigIntSignalHandler;
 	sigemptyset(&sig_handler.sa_mask);
 	sig_handler.sa_flags = 0;
 

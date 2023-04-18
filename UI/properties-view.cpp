@@ -108,8 +108,8 @@ void OBSPropertiesView::ReloadProperties()
 
 void OBSPropertiesView::RefreshProperties()
 {
-	int h, v;
-	GetScrollPos(h, v);
+	int h, v, hend, vend;
+	GetScrollPos(h, v, hend, vend);
 
 	children.clear();
 	if (widget)
@@ -136,9 +136,9 @@ void OBSPropertiesView::RefreshProperties()
 
 	setWidgetResizable(true);
 	setWidget(widget);
-	SetScrollPos(h, v);
 	setSizePolicy(mainPolicy);
 	adjustSize();
+	SetScrollPos(h, v, hend, vend);
 
 	lastFocused.clear();
 	if (lastWidget) {
@@ -154,28 +154,36 @@ void OBSPropertiesView::RefreshProperties()
 	emit PropertiesRefreshed();
 }
 
-void OBSPropertiesView::SetScrollPos(int h, int v)
+void OBSPropertiesView::SetScrollPos(int h, int v, int old_hend, int old_vend)
 {
 	QScrollBar *scroll = horizontalScrollBar();
-	if (scroll)
-		scroll->setValue(h);
+	if (scroll) {
+		int hend = scroll->maximum() + scroll->pageStep();
+		scroll->setValue(h * hend / old_hend);
+	}
 
 	scroll = verticalScrollBar();
-	if (scroll)
-		scroll->setValue(v);
+	if (scroll) {
+		int vend = scroll->maximum() + scroll->pageStep();
+		scroll->setValue(v * vend / old_vend);
+	}
 }
 
-void OBSPropertiesView::GetScrollPos(int &h, int &v)
+void OBSPropertiesView::GetScrollPos(int &h, int &v, int &hend, int &vend)
 {
 	h = v = 0;
 
 	QScrollBar *scroll = horizontalScrollBar();
-	if (scroll)
+	if (scroll) {
 		h = scroll->value();
+		hend = scroll->maximum() + scroll->pageStep();
+	}
 
 	scroll = verticalScrollBar();
-	if (scroll)
+	if (scroll) {
 		v = scroll->value();
+		vend = scroll->maximum() + scroll->pageStep();
+	}
 }
 
 OBSPropertiesView::OBSPropertiesView(OBSData settings_, obs_object_t *obj,
@@ -671,11 +679,8 @@ void OBSPropertiesView::AddEditableList(obs_property_t *prop,
 	WidgetInfo *info = new WidgetInfo(this, prop, list);
 
 	list->setDragDropMode(QAbstractItemView::InternalMove);
-	connect(list->model(),
-		SIGNAL(rowsMoved(QModelIndex, int, int, QModelIndex, int)),
-		info,
-		SLOT(EditListReordered(const QModelIndex &, int, int,
-				       const QModelIndex &, int)));
+	connect(list->model(), SIGNAL(rowsMoved()), info,
+		SLOT(EditListReordered()));
 
 	QVBoxLayout *sideLayout = new QVBoxLayout();
 	NewButton(sideLayout, info, "addIconSmall", &WidgetInfo::EditListAdd);
@@ -1913,16 +1918,8 @@ void WidgetInfo::GroupChanged(const char *setting)
 						  : true);
 }
 
-void WidgetInfo::EditListReordered(const QModelIndex &parent, int start,
-				   int end, const QModelIndex &destination,
-				   int row)
+void WidgetInfo::EditListReordered()
 {
-	UNUSED_PARAMETER(parent);
-	UNUSED_PARAMETER(start);
-	UNUSED_PARAMETER(end);
-	UNUSED_PARAMETER(destination);
-	UNUSED_PARAMETER(row);
-
 	EditableListChanged();
 }
 

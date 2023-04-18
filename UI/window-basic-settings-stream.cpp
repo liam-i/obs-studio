@@ -170,7 +170,7 @@ void OBSBasicSettings::LoadStream1Settings()
 	ui->key->setText(key);
 
 	lastService.clear();
-	on_service_currentIndexChanged(0);
+	ServiceChanged();
 
 	UpdateKeyLink();
 	UpdateMoreInfoLink();
@@ -201,6 +201,7 @@ void OBSBasicSettings::SaveStream1Settings()
 	if (!customServer) {
 		obs_data_set_string(settings, "service",
 				    QT_TO_UTF8(ui->service->currentText()));
+		obs_data_set_string(settings, "protocol", QT_TO_UTF8(protocol));
 		obs_data_set_string(
 			settings, "server",
 			QT_TO_UTF8(ui->server->currentData().toString()));
@@ -533,11 +534,14 @@ void OBSBasicSettings::ServiceChanged()
 
 QString OBSBasicSettings::FindProtocol()
 {
-	if (IsCustomService() && !ui->customServer->text().isEmpty()) {
+	if (IsCustomService()) {
+		if (ui->customServer->text().isEmpty())
+			return QString("RTMP");
 
 		QString server = ui->customServer->text();
 
-		if (server.startsWith("rtmps://"))
+		if (obs_is_output_protocol_registered("RTMPS") &&
+		    server.startsWith("rtmps://"))
 			return QString("RTMPS");
 
 		if (server.startsWith("ftl://"))
@@ -1350,12 +1354,14 @@ bool OBSBasicSettings::ServiceAndACodecCompatible()
 /* we really need a way to find fallbacks in a less hardcoded way. maybe. */
 static QString get_adv_fallback(const QString &enc)
 {
-	if (enc == "jim_hevc_nvenc")
+	if (enc == "jim_hevc_nvenc" || enc == "jim_av1_nvenc")
 		return "jim_nvenc";
-	if (enc == "h265_texture_amf")
+	if (enc == "h265_texture_amf" || enc == "av1_texture_amf")
 		return "h264_texture_amf";
 	if (enc == "com.apple.videotoolbox.videoencoder.ave.hevc")
 		return "com.apple.videotoolbox.videoencoder.ave.avc";
+	if (enc == "obs_qsv11_av1")
+		return "obs_qsv11";
 	return "obs_x264";
 }
 
@@ -1377,14 +1383,14 @@ static QString get_adv_audio_fallback(const QString &enc)
 
 static QString get_simple_fallback(const QString &enc)
 {
-	if (enc == SIMPLE_ENCODER_NVENC_HEVC)
+	if (enc == SIMPLE_ENCODER_NVENC_HEVC || enc == SIMPLE_ENCODER_NVENC_AV1)
 		return SIMPLE_ENCODER_NVENC;
-	if (enc == SIMPLE_ENCODER_NVENC_AV1)
-		return SIMPLE_ENCODER_NVENC;
-	if (enc == SIMPLE_ENCODER_AMD_HEVC)
+	if (enc == SIMPLE_ENCODER_AMD_HEVC || enc == SIMPLE_ENCODER_AMD_AV1)
 		return SIMPLE_ENCODER_AMD;
 	if (enc == SIMPLE_ENCODER_APPLE_HEVC)
 		return SIMPLE_ENCODER_APPLE_H264;
+	if (enc == SIMPLE_ENCODER_QSV_AV1)
+		return SIMPLE_ENCODER_QSV;
 	return SIMPLE_ENCODER_X264;
 }
 
@@ -1429,8 +1435,10 @@ bool OBSBasicSettings::ServiceSupportsCodecCheck()
 
 		cur_audio_name = ui->simpleOutStrAEncoder->itemText(
 			ui->simpleOutStrAEncoder->findData(cur_enc));
-		fb_audio_name = ui->simpleOutStrAEncoder->itemText(
-			ui->simpleOutStrAEncoder->findData(fb_enc));
+		fb_audio_name =
+			(cur_enc == "opus")
+				? QTStr("Basic.Settings.Output.Simple.Codec.AAC")
+				: QTStr("Basic.Settings.Output.Simple.Codec.Opus");
 	} else {
 		QString cur_enc = ui->advOutEncoder->currentData().toString();
 		QString fb_enc = get_adv_fallback(cur_enc);
@@ -1609,6 +1617,10 @@ void OBSBasicSettings::ResetEncoders(bool streamOnly)
 		ui->simpleOutStrEncoder->addItem(
 			ENCODER_STR("Hardware.AMD.H264"),
 			QString(SIMPLE_ENCODER_AMD));
+	if (service_supports_encoder(vcodecs, "av1_texture_amf"))
+		ui->simpleOutStrEncoder->addItem(
+			ENCODER_STR("Hardware.AMD.AV1"),
+			QString(SIMPLE_ENCODER_AMD_AV1));
 /* Preprocessor guard required for the macOS version check */
 #ifdef __APPLE__
 	if (service_supports_encoder(
@@ -1641,9 +1653,13 @@ void OBSBasicSettings::ResetEncoders(bool streamOnly)
 	if (service_supports_encoder(acodecs, "CoreAudio_AAC") ||
 	    service_supports_encoder(acodecs, "libfdk_aac") ||
 	    service_supports_encoder(acodecs, "ffmpeg_aac"))
-		ui->simpleOutStrAEncoder->addItem("AAC", "aac");
+		ui->simpleOutStrAEncoder->addItem(
+			QTStr("Basic.Settings.Output.Simple.Codec.AAC.Default"),
+			"aac");
 	if (service_supports_encoder(acodecs, "ffmpeg_opus"))
-		ui->simpleOutStrAEncoder->addItem("Opus", "opus");
+		ui->simpleOutStrAEncoder->addItem(
+			QTStr("Basic.Settings.Output.Simple.Codec.Opus"),
+			"opus");
 #undef ENCODER_STR
 
 	/* ------------------------------------------------- */

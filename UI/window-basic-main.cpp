@@ -379,12 +379,8 @@ OBSBasic::OBSBasic(QWidget *parent)
 
 	UpdateTitleBar();
 
-	connect(ui->scenes->itemDelegate(),
-		SIGNAL(closeEditor(QWidget *,
-				   QAbstractItemDelegate::EndEditHint)),
-		this,
-		SLOT(SceneNameEdited(QWidget *,
-				     QAbstractItemDelegate::EndEditHint)));
+	connect(ui->scenes->itemDelegate(), SIGNAL(closeEditor(QWidget *)),
+		this, SLOT(SceneNameEdited(QWidget *)));
 
 	cpuUsageInfo = os_cpu_usage_info_start();
 	cpuUsageTimer = new QTimer(this);
@@ -509,9 +505,6 @@ OBSBasic::OBSBasic(QWidget *parent)
 	statsDock->move(newPos);
 
 	ui->previewDisabledWidget->setContextMenuPolicy(Qt::CustomContextMenu);
-	connect(ui->previewDisabledWidget,
-		SIGNAL(customContextMenuRequested(const QPoint &)), this,
-		SLOT(PreviewDisabledMenu(const QPoint &)));
 	connect(ui->enablePreviewButton, SIGNAL(clicked()), this,
 		SLOT(TogglePreview()));
 
@@ -1378,6 +1371,13 @@ static const double scaled_vals[] = {1.0,         1.25, (1.0 / 0.75), 1.5,
 				     2.5,         2.75, 3.0,          0.0};
 
 extern void CheckExistingCookieId();
+#if OBS_RELEASE_CANDIDATE == 0 && OBS_BETA == 0
+#define DEFAULT_CONTAINER "mkv"
+#elif defined(__APPLE__)
+#define DEFAULT_CONTAINER "fragmented_mov"
+#else
+#define DEFAULT_CONTAINER "fragmented_mp4"
+#endif
 
 bool OBSBasic::InitBasicConfigDefaults()
 {
@@ -1473,6 +1473,40 @@ bool OBSBasic::InitBasicConfigDefaults()
 	}
 
 	/* ----------------------------------------------------- */
+	/* Migrate old container selection (if any) to new key.  */
+
+	auto MigrateFormat = [&](const char *section) {
+		bool has_old_key = config_has_user_value(basicConfig, section,
+							 "RecFormat");
+		bool has_new_key = config_has_user_value(basicConfig, section,
+							 "RecFormat2");
+		if (!has_new_key && !has_old_key)
+			return;
+
+		string old_format = config_get_string(
+			basicConfig, section,
+			has_new_key ? "RecFormat2" : "RecFormat");
+		string new_format = old_format;
+		if (old_format == "ts")
+			new_format = "mpegts";
+		else if (old_format == "m3u8")
+			new_format = "hls";
+		else if (old_format == "fmp4")
+			new_format = "fragmented_mp4";
+		else if (old_format == "fmov")
+			new_format = "fragmented_mov";
+
+		if (new_format != old_format || !has_new_key) {
+			config_set_string(basicConfig, section, "RecFormat2",
+					  new_format.c_str());
+			changed = true;
+		}
+	};
+
+	MigrateFormat("AdvOut");
+	MigrateFormat("SimpleOutput");
+
+	/* ----------------------------------------------------- */
 
 	if (changed)
 		config_save_safe(basicConfig, "tmp", nullptr);
@@ -1486,8 +1520,8 @@ bool OBSBasic::InitBasicConfigDefaults()
 
 	config_set_default_string(basicConfig, "SimpleOutput", "FilePath",
 				  GetDefaultVideoSavePath().c_str());
-	config_set_default_string(basicConfig, "SimpleOutput", "RecFormat",
-				  "mkv");
+	config_set_default_string(basicConfig, "SimpleOutput", "RecFormat2",
+				  DEFAULT_CONTAINER);
 	config_set_default_uint(basicConfig, "SimpleOutput", "VBitrate", 2500);
 	config_set_default_uint(basicConfig, "SimpleOutput", "ABitrate", 160);
 	config_set_default_bool(basicConfig, "SimpleOutput", "UseAdvanced",
@@ -1507,6 +1541,8 @@ bool OBSBasic::InitBasicConfigDefaults()
 				  "StreamAudioEncoder", "aac");
 	config_set_default_string(basicConfig, "SimpleOutput",
 				  "RecAudioEncoder", "aac");
+	config_set_default_uint(basicConfig, "SimpleOutput", "RecTracks",
+				(1 << 0));
 
 	config_set_default_bool(basicConfig, "AdvOut", "ApplyServiceSettings",
 				true);
@@ -1519,7 +1555,8 @@ bool OBSBasic::InitBasicConfigDefaults()
 
 	config_set_default_string(basicConfig, "AdvOut", "RecFilePath",
 				  GetDefaultVideoSavePath().c_str());
-	config_set_default_string(basicConfig, "AdvOut", "RecFormat", "mkv");
+	config_set_default_string(basicConfig, "AdvOut", "RecFormat2",
+				  DEFAULT_CONTAINER);
 	config_set_default_bool(basicConfig, "AdvOut", "RecUseRescale", false);
 	config_set_default_uint(basicConfig, "AdvOut", "RecTracks", (1 << 0));
 	config_set_default_string(basicConfig, "AdvOut", "RecEncoder", "none");
@@ -1824,9 +1861,6 @@ void OBSBasic::ResetOutputs()
 	}
 }
 
-static void AddProjectorMenuMonitors(QMenu *parent, QObject *target,
-				     const char *slot);
-
 #define STARTUP_SEPARATOR \
 	"==== Startup complete ==============================================="
 #define SHUTDOWN_SEPARATOR \
@@ -1934,11 +1968,11 @@ void OBSBasic::OBSInit()
 
 	blog(LOG_INFO, STARTUP_SEPARATOR);
 
-	ResetOutputs();
-	CreateHotkeys();
-
 	if (!InitService())
 		throw "Failed to initialize service";
+
+	ResetOutputs();
+	CreateHotkeys();
 
 	InitPrimitives();
 
@@ -3096,7 +3130,8 @@ void OBSBasic::RemoveScene(OBSSource source)
 		api->on_event(OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED);
 }
 
-static bool select_one(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+static bool select_one(obs_scene_t * /* scene */, obs_sceneitem_t *item,
+		       void *param)
 {
 	obs_sceneitem_t *selectedItem =
 		reinterpret_cast<obs_sceneitem_t *>(param);
@@ -3105,7 +3140,6 @@ static bool select_one(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
 
 	obs_sceneitem_select(item, (selectedItem == item));
 
-	UNUSED_PARAMETER(scene);
 	return true;
 }
 
@@ -3896,8 +3930,9 @@ void OBSBasic::CheckForUpdates(bool manualUpdate)
 		&OBSBasic::MacBranchesFetched, Qt::QueuedConnection);
 	updateCheckThread.reset(mut);
 	updateCheckThread->start();
-#endif
+#else
 	UNUSED_PARAMETER(manualUpdate);
+#endif
 }
 
 void OBSBasic::MacBranchesFetched(const QString &branch, bool manualUpdate)
@@ -3999,11 +4034,9 @@ void OBSBasic::DuplicateSelectedScene()
 	}
 }
 
-static bool save_undo_source_enum(obs_scene_t *scene, obs_sceneitem_t *item,
-				  void *p)
+static bool save_undo_source_enum(obs_scene_t * /* scene */,
+				  obs_sceneitem_t *item, void *p)
 {
-	UNUSED_PARAMETER(scene);
-
 	obs_source_t *source = obs_sceneitem_get_source(item);
 	if (obs_obj_is_private(source) && !obs_source_removed(source))
 		return true;
@@ -4031,8 +4064,7 @@ static bool save_undo_source_enum(obs_scene_t *scene, obs_sceneitem_t *item,
 static inline void RemoveSceneAndReleaseNested(obs_source_t *source)
 {
 	obs_source_remove(source);
-	auto cb = [](void *unused, obs_source_t *source) {
-		UNUSED_PARAMETER(unused);
+	auto cb = [](void *, obs_source_t *source) {
 		if (strcmp(obs_source_get_id(source), "scene") == 0)
 			obs_scene_prune_sources(obs_scene_from_source(source));
 		return true;
@@ -4146,9 +4178,8 @@ void OBSBasic::RemoveSelectedScene()
 
 			/* Clear scene, but keep a reference to all sources in the scene to make sure they don't get destroyed */
 			std::vector<OBSSource> existing_sources;
-			auto cb = [](obs_scene_t *scene, obs_sceneitem_t *item,
+			auto cb = [](obs_scene_t *, obs_sceneitem_t *item,
 				     void *data) {
-				UNUSED_PARAMETER(scene);
 				std::vector<OBSSource> *existing =
 					(std::vector<OBSSource> *)data;
 				OBSSource source =
@@ -4363,7 +4394,7 @@ void OBSBasic::DrawBackdrop(float cx, float cy)
 	GS_DEBUG_MARKER_END();
 }
 
-void OBSBasic::RenderMain(void *data, uint32_t cx, uint32_t cy)
+void OBSBasic::RenderMain(void *data, uint32_t, uint32_t)
 {
 	GS_DEBUG_MARKER_BEGIN(GS_DEBUG_COLOR_DEFAULT, "RenderMain");
 
@@ -4439,9 +4470,6 @@ void OBSBasic::RenderMain(void *data, uint32_t cx, uint32_t cy)
 	gs_viewport_pop();
 
 	GS_DEBUG_MARKER_END();
-
-	UNUSED_PARAMETER(cx);
-	UNUSED_PARAMETER(cy);
 }
 
 /* Main class functions */
@@ -4829,9 +4857,8 @@ void OBSBasic::ClearSceneData()
 	copyFiltersSource = nullptr;
 	copyFilter = nullptr;
 
-	auto cb = [](void *unused, obs_source_t *source) {
+	auto cb = [](void *, obs_source_t *source) {
 		obs_source_remove(source);
-		UNUSED_PARAMETER(unused);
 		return true;
 	};
 
@@ -5187,7 +5214,7 @@ void OBSBasic::on_actionMixerToolbarMenu_triggered()
 }
 
 void OBSBasic::on_scenes_currentItemChanged(QListWidgetItem *current,
-					    QListWidgetItem *prev)
+					    QListWidgetItem *)
 {
 	OBSSource source;
 
@@ -5209,8 +5236,6 @@ void OBSBasic::on_scenes_currentItemChanged(QListWidgetItem *current,
 		api->on_event(OBS_FRONTEND_EVENT_PREVIEW_SCENE_CHANGED);
 
 	UpdateContextBar();
-
-	UNUSED_PARAMETER(prev);
 }
 
 void OBSBasic::EditSceneName()
@@ -5955,7 +5980,8 @@ QMenu *OBSBasic::CreateAddSourcePopupMenu()
 		QList<QAction *> actions = menu->actions();
 
 		for (QAction *menuAction : actions) {
-			if (menuAction->text().compare(name) >= 0)
+			if (menuAction->text().compare(
+				    name, Qt::CaseInsensitive) >= 0)
 				return menuAction;
 		}
 
@@ -6343,9 +6369,8 @@ void OBSBasic::UploadLog(const char *subdir, const char *file, const bool crash)
 		logUploadThread->wait();
 	}
 
-	RemoteTextThread *thread =
-		new RemoteTextThread("https://obsproject.com/logs/upload",
-				     "text/plain", ss.str().c_str());
+	RemoteTextThread *thread = new RemoteTextThread(
+		"https://obsproject.com/logs/upload", "text/plain", ss.str());
 
 	logUploadThread.reset(thread);
 	if (crash) {
@@ -6516,8 +6541,7 @@ static void RenameListItem(OBSBasic *parent, QListWidget *listWidget,
 	}
 }
 
-void OBSBasic::SceneNameEdited(QWidget *editor,
-			       QAbstractItemDelegate::EndEditHint endHint)
+void OBSBasic::SceneNameEdited(QWidget *editor)
 {
 	OBSScene scene = GetCurrentScene();
 	QLineEdit *edit = qobject_cast<QLineEdit *>(editor);
@@ -6533,8 +6557,6 @@ void OBSBasic::SceneNameEdited(QWidget *editor,
 
 	if (api)
 		api->on_event(OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED);
-
-	UNUSED_PARAMETER(endHint);
 }
 
 void OBSBasic::OpenFilters(OBSSource source)
@@ -7252,6 +7274,10 @@ void OBSBasic::StreamingStop(int code, QString last_error)
 		encode_error = true;
 		break;
 
+	case OBS_OUTPUT_HDR_DISABLED:
+		errorDescription = Str("Output.ConnectFail.HdrDisabled");
+		break;
+
 	default:
 	case OBS_OUTPUT_ERROR:
 		use_last_error = true;
@@ -7367,8 +7393,13 @@ void OBSBasic::AutoRemux(QString input, bool no_show)
 	const obs_encoder_t *videoEncoder =
 		obs_output_get_video_encoder(outputHandler->fileOutput);
 	const char *codecName = obs_encoder_get_codec(videoEncoder);
+	const char *format = config_get_string(
+		config, isSimpleMode ? "SimpleOutput" : "AdvOut", "RecFormat2");
 
-	if (strcmp(codecName, "prores") == 0) {
+	/* Retain original container for fMP4/fMOV */
+	if (strncmp(format, "fragmented", 10) == 0) {
+		output += "remuxed." + suffix;
+	} else if (strcmp(codecName, "prores") == 0) {
 		output += "mov";
 	} else {
 		output += "mp4";
@@ -8051,14 +8082,12 @@ QModelIndexList OBSBasic::GetAllSelectedSourceItems()
 	return ui->sources->selectionModel()->selectedIndexes();
 }
 
-void OBSBasic::on_preview_customContextMenuRequested(const QPoint &pos)
+void OBSBasic::on_preview_customContextMenuRequested()
 {
 	CreateSourcePopupMenu(GetTopSelectedSourceItem(), true);
-
-	UNUSED_PARAMETER(pos);
 }
 
-void OBSBasic::ProgramViewContextMenuRequested(const QPoint &)
+void OBSBasic::ProgramViewContextMenuRequested()
 {
 	QMenu popup(this);
 	QPointer<QMenu> studioProgramProjector;
@@ -8081,7 +8110,7 @@ void OBSBasic::ProgramViewContextMenuRequested(const QPoint &)
 	popup.exec(QCursor::pos());
 }
 
-void OBSBasic::PreviewDisabledMenu(const QPoint &pos)
+void OBSBasic::on_previewDisabledWidget_customContextMenuRequested()
 {
 	QMenu popup(this);
 	delete previewProjectorMain;
@@ -8102,8 +8131,6 @@ void OBSBasic::PreviewDisabledMenu(const QPoint &pos)
 	popup.addMenu(previewProjectorMain);
 	popup.addAction(previewWindow);
 	popup.exec(QCursor::pos());
-
-	UNUSED_PARAMETER(pos);
 }
 
 void OBSBasic::on_actionAlwaysOnTop_triggered()
@@ -8340,7 +8367,7 @@ void OBSBasic::on_actionPasteTransform_triggered()
 		undo_redo, undo_redo, undo_data, redo_data);
 }
 
-static bool reset_tr(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+static bool reset_tr(obs_scene_t * /* scene */, obs_sceneitem_t *item, void *)
 {
 	if (obs_sceneitem_is_group(item))
 		obs_sceneitem_group_enum_items(item, reset_tr, nullptr);
@@ -8366,8 +8393,6 @@ static bool reset_tr(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
 
 	obs_sceneitem_defer_update_end(item);
 
-	UNUSED_PARAMETER(scene);
-	UNUSED_PARAMETER(param);
 	return true;
 }
 
@@ -8432,8 +8457,8 @@ static void SetItemTL(obs_sceneitem_t *item, const vec3 &tl)
 	obs_sceneitem_set_pos(item, &pos);
 }
 
-static bool RotateSelectedSources(obs_scene_t *scene, obs_sceneitem_t *item,
-				  void *param)
+static bool RotateSelectedSources(obs_scene_t * /* scene */,
+				  obs_sceneitem_t *item, void *param)
 {
 	if (obs_sceneitem_is_group(item))
 		obs_sceneitem_group_enum_items(item, RotateSelectedSources,
@@ -8458,7 +8483,6 @@ static bool RotateSelectedSources(obs_scene_t *scene, obs_sceneitem_t *item,
 
 	SetItemTL(item, tl);
 
-	UNUSED_PARAMETER(scene);
 	return true;
 };
 
@@ -8513,8 +8537,8 @@ void OBSBasic::on_actionRotate180_triggered()
 			  undo_redo, undo_redo, undo_data, redo_data);
 }
 
-static bool MultiplySelectedItemScale(obs_scene_t *scene, obs_sceneitem_t *item,
-				      void *param)
+static bool MultiplySelectedItemScale(obs_scene_t * /* scene */,
+				      obs_sceneitem_t *item, void *param)
 {
 	vec2 &mul = *reinterpret_cast<vec2 *>(param);
 
@@ -8537,7 +8561,6 @@ static bool MultiplySelectedItemScale(obs_scene_t *scene, obs_sceneitem_t *item,
 
 	SetItemTL(item, tl);
 
-	UNUSED_PARAMETER(scene);
 	return true;
 }
 
@@ -8579,8 +8602,8 @@ void OBSBasic::on_actionFlipVertical_triggered()
 			  undo_redo, undo_redo, undo_data, redo_data);
 }
 
-static bool CenterAlignSelectedItems(obs_scene_t *scene, obs_sceneitem_t *item,
-				     void *param)
+static bool CenterAlignSelectedItems(obs_scene_t * /* scene */,
+				     obs_sceneitem_t *item, void *param)
 {
 	obs_bounds_type boundsType =
 		*reinterpret_cast<obs_bounds_type *>(param);
@@ -8609,7 +8632,6 @@ static bool CenterAlignSelectedItems(obs_scene_t *scene, obs_sceneitem_t *item,
 
 	obs_sceneitem_set_info(item, &itemInfo);
 
-	UNUSED_PARAMETER(scene);
 	return true;
 }
 

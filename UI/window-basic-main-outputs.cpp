@@ -47,14 +47,12 @@ static void OBSStreamStopping(void *data, calldata_t *params)
 					  Q_ARG(int, sec));
 }
 
-static void OBSStartStreaming(void *data, calldata_t *params)
+static void OBSStartStreaming(void *data, calldata_t * /* params */)
 {
 	BasicOutputHandler *output = static_cast<BasicOutputHandler *>(data);
 	output->streamingActive = true;
 	os_atomic_set_bool(&streaming_active, true);
 	QMetaObject::invokeMethod(output->main, "StreamingStart");
-
-	UNUSED_PARAMETER(params);
 }
 
 static void OBSStopStreaming(void *data, calldata_t *params)
@@ -73,15 +71,13 @@ static void OBSStopStreaming(void *data, calldata_t *params)
 				  Q_ARG(QString, arg_last_error));
 }
 
-static void OBSStartRecording(void *data, calldata_t *params)
+static void OBSStartRecording(void *data, calldata_t * /* params */)
 {
 	BasicOutputHandler *output = static_cast<BasicOutputHandler *>(data);
 
 	output->recordingActive = true;
 	os_atomic_set_bool(&recording_active, true);
 	QMetaObject::invokeMethod(output->main, "RecordingStart");
-
-	UNUSED_PARAMETER(params);
 }
 
 static void OBSStopRecording(void *data, calldata_t *params)
@@ -100,12 +96,10 @@ static void OBSStopRecording(void *data, calldata_t *params)
 				  Q_ARG(QString, arg_last_error));
 }
 
-static void OBSRecordStopping(void *data, calldata_t *params)
+static void OBSRecordStopping(void *data, calldata_t * /* params */)
 {
 	BasicOutputHandler *output = static_cast<BasicOutputHandler *>(data);
 	QMetaObject::invokeMethod(output->main, "RecordStopping");
-
-	UNUSED_PARAMETER(params);
 }
 
 static void OBSRecordFileChanged(void *data, calldata_t *params)
@@ -122,15 +116,13 @@ static void OBSRecordFileChanged(void *data, calldata_t *params)
 	output->lastRecordingPath = next_file;
 }
 
-static void OBSStartReplayBuffer(void *data, calldata_t *params)
+static void OBSStartReplayBuffer(void *data, calldata_t * /* params */)
 {
 	BasicOutputHandler *output = static_cast<BasicOutputHandler *>(data);
 
 	output->replayBufferActive = true;
 	os_atomic_set_bool(&replaybuf_active, true);
 	QMetaObject::invokeMethod(output->main, "ReplayBufferStart");
-
-	UNUSED_PARAMETER(params);
 }
 
 static void OBSStopReplayBuffer(void *data, calldata_t *params)
@@ -144,30 +136,26 @@ static void OBSStopReplayBuffer(void *data, calldata_t *params)
 				  Q_ARG(int, code));
 }
 
-static void OBSReplayBufferStopping(void *data, calldata_t *params)
+static void OBSReplayBufferStopping(void *data, calldata_t * /* params */)
 {
 	BasicOutputHandler *output = static_cast<BasicOutputHandler *>(data);
 	QMetaObject::invokeMethod(output->main, "ReplayBufferStopping");
-
-	UNUSED_PARAMETER(params);
 }
 
-static void OBSReplayBufferSaved(void *data, calldata_t *)
+static void OBSReplayBufferSaved(void *data, calldata_t * /* params */)
 {
 	BasicOutputHandler *output = static_cast<BasicOutputHandler *>(data);
 	QMetaObject::invokeMethod(output->main, "ReplayBufferSaved",
 				  Qt::QueuedConnection);
 }
 
-static void OBSStartVirtualCam(void *data, calldata_t *params)
+static void OBSStartVirtualCam(void *data, calldata_t * /* params */)
 {
 	BasicOutputHandler *output = static_cast<BasicOutputHandler *>(data);
 
 	output->virtualCamActive = true;
 	os_atomic_set_bool(&virtualcam_active, true);
 	QMetaObject::invokeMethod(output->main, "OnVirtualCamStart");
-
-	UNUSED_PARAMETER(params);
 }
 
 static void OBSStopVirtualCam(void *data, calldata_t *params)
@@ -438,6 +426,7 @@ struct SimpleOutput : BasicOutputHandler {
 	OBSEncoder audioRecording;
 	OBSEncoder audioArchive;
 	OBSEncoder videoRecording;
+	OBSEncoder audioTrack[MAX_AUDIO_MIXES];
 
 	string videoEncoder;
 	string videoQuality;
@@ -502,8 +491,6 @@ void SimpleOutput::LoadRecordingPreset_Lossless()
 	obs_data_set_string(settings, "video_encoder", "utvideo");
 	obs_data_set_string(settings, "audio_encoder", "pcm_s16le");
 
-	int aMixes = 1;
-	obs_output_set_mixers(fileOutput, aMixes);
 	obs_output_update(fileOutput, settings);
 }
 
@@ -611,6 +598,25 @@ void SimpleOutput::LoadRecordingPreset()
 		if (!success)
 			throw "Failed to create audio recording encoder "
 			      "(simple output)";
+		for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
+			char name[23];
+			if (strcmp(audio_encoder, "opus") == 0) {
+				snprintf(name, sizeof name,
+					 "simple_opus_recording%d", i);
+				success = CreateSimpleOpusEncoder(
+					audioTrack[i], GetAudioBitrate(), name,
+					i);
+			} else {
+				snprintf(name, sizeof name,
+					 "simple_aac_recording%d", i);
+				success = CreateSimpleAACEncoder(
+					audioTrack[i], GetAudioBitrate(), name,
+					i);
+			}
+			if (!success)
+				throw "Failed to create multi-track audio recording encoder "
+				      "(simple output)";
+		}
 	}
 }
 
@@ -813,7 +819,23 @@ void SimpleOutput::UpdateRecordingAudioSettings()
 	obs_data_set_int(settings, "bitrate", 192);
 	obs_data_set_string(settings, "rate_control", "CBR");
 
-	obs_encoder_update(audioRecording, settings);
+	int tracks =
+		config_get_int(main->Config(), "SimpleOutput", "RecTracks");
+	const char *recFormat =
+		config_get_string(main->Config(), "SimpleOutput", "RecFormat2");
+	const char *quality =
+		config_get_string(main->Config(), "SimpleOutput", "RecQuality");
+	bool flv = strcmp(recFormat, "flv") == 0;
+
+	if (flv || strcmp(quality, "Stream") == 0) {
+		obs_encoder_update(audioRecording, settings);
+	} else {
+		for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
+			if ((tracks & (1 << i)) != 0) {
+				obs_encoder_update(audioTrack[i], settings);
+			}
+		}
+	}
 }
 
 #define CROSS_DIST_CUTOFF 2000.0
@@ -987,6 +1009,11 @@ inline void SimpleOutput::SetupOutputs()
 	obs_encoder_set_video(videoStreaming, obs_get_video());
 	obs_encoder_set_audio(audioStreaming, obs_get_audio());
 	obs_encoder_set_audio(audioArchive, obs_get_audio());
+	int tracks =
+		config_get_int(main->Config(), "SimpleOutput", "RecTracks");
+	const char *recFormat =
+		config_get_string(main->Config(), "SimpleOutput", "RecFormat2");
+	bool flv = strcmp(recFormat, "flv") == 0;
 
 	if (usingRecordingPreset) {
 		if (ffmpegOutput) {
@@ -994,8 +1021,21 @@ inline void SimpleOutput::SetupOutputs()
 					     obs_get_audio());
 		} else {
 			obs_encoder_set_video(videoRecording, obs_get_video());
-			obs_encoder_set_audio(audioRecording, obs_get_audio());
+			if (flv) {
+				obs_encoder_set_audio(audioRecording,
+						      obs_get_audio());
+			} else {
+				for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
+					if ((tracks & (1 << i)) != 0) {
+						obs_encoder_set_audio(
+							audioTrack[i],
+							obs_get_audio());
+					}
+				}
+			}
 		}
+	} else {
+		obs_encoder_set_audio(audioRecording, obs_get_audio());
 	}
 }
 
@@ -1059,9 +1099,6 @@ bool SimpleOutput::SetupStreaming(obs_service_t *service)
 		stopStreaming.Connect(
 			obs_output_get_signal_handler(streamOutput), "stop",
 			OBSStopStreaming, this);
-
-		bool isEncoded = obs_output_get_flags(streamOutput) &
-				 OBS_OUTPUT_ENCODED;
 
 		outputType = type;
 	}
@@ -1178,6 +1215,16 @@ bool SimpleOutput::StartStreaming(obs_service_t *service)
 
 void SimpleOutput::UpdateRecording()
 {
+	const char *recFormat =
+		config_get_string(main->Config(), "SimpleOutput", "RecFormat2");
+	bool flv = strcmp(recFormat, "flv") == 0;
+	int tracks =
+		config_get_int(main->Config(), "SimpleOutput", "RecTracks");
+	int idx = 0;
+	int idx2 = 0;
+	const char *quality =
+		config_get_string(main->Config(), "SimpleOutput", "RecQuality");
+
 	if (replayBufferActive || recordingActive)
 		return;
 
@@ -1193,11 +1240,33 @@ void SimpleOutput::UpdateRecording()
 
 	if (!ffmpegOutput) {
 		obs_output_set_video_encoder(fileOutput, videoRecording);
-		obs_output_set_audio_encoder(fileOutput, audioRecording, 0);
+		if (flv || strcmp(quality, "Stream") == 0) {
+			obs_output_set_audio_encoder(fileOutput, audioRecording,
+						     0);
+		} else {
+			for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
+				if ((tracks & (1 << i)) != 0) {
+					obs_output_set_audio_encoder(
+						fileOutput, audioTrack[i],
+						idx++);
+				}
+			}
+		}
 	}
 	if (replayBuffer) {
 		obs_output_set_video_encoder(replayBuffer, videoRecording);
-		obs_output_set_audio_encoder(replayBuffer, audioRecording, 0);
+		if (flv || strcmp(quality, "Stream") == 0) {
+			obs_output_set_audio_encoder(replayBuffer,
+						     audioRecording, 0);
+		} else {
+			for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
+				if ((tracks & (1 << i)) != 0) {
+					obs_output_set_audio_encoder(
+						replayBuffer, audioTrack[i],
+						idx2++);
+				}
+			}
+		}
 	}
 
 	recordingConfigured = true;
@@ -1208,7 +1277,7 @@ bool SimpleOutput::ConfigureRecording(bool updateReplayBuffer)
 	const char *path =
 		config_get_string(main->Config(), "SimpleOutput", "FilePath");
 	const char *format =
-		config_get_string(main->Config(), "SimpleOutput", "RecFormat");
+		config_get_string(main->Config(), "SimpleOutput", "RecFormat2");
 	const char *mux = config_get_string(main->Config(), "SimpleOutput",
 					    "MuxerCustom");
 	bool noSpace = config_get_bool(main->Config(), "SimpleOutput",
@@ -1225,37 +1294,33 @@ bool SimpleOutput::ConfigureRecording(bool updateReplayBuffer)
 		config_get_int(main->Config(), "SimpleOutput", "RecRBTime");
 	int rbSize =
 		config_get_int(main->Config(), "SimpleOutput", "RecRBSize");
+	int tracks =
+		config_get_int(main->Config(), "SimpleOutput", "RecTracks");
 
-	bool is_fragmented = strcmp(format, "fmp4") == 0 ||
-			     strcmp(format, "fmov") == 0;
+	bool is_fragmented = strncmp(format, "fragmented", 10) == 0;
 
 	string f;
-	string strPath;
-
-	if (is_fragmented)
-		++format;
 
 	OBSDataAutoRelease settings = obs_data_create();
 	if (updateReplayBuffer) {
 		f = GetFormatString(filenameFormat, rbPrefix, rbSuffix);
-		strPath = GetOutputFilename(path, ffmpegOutput ? "avi" : format,
-					    noSpace, overwriteIfExists,
-					    f.c_str());
+		string ext = GetFormatExt(format);
 		obs_data_set_string(settings, "directory", path);
 		obs_data_set_string(settings, "format", f.c_str());
-		obs_data_set_string(settings, "extension", format);
+		obs_data_set_string(settings, "extension", ext.c_str());
 		obs_data_set_bool(settings, "allow_spaces", !noSpace);
 		obs_data_set_int(settings, "max_time_sec", rbTime);
 		obs_data_set_int(settings, "max_size_mb",
 				 usingRecordingPreset ? rbSize : 0);
 	} else {
 		f = GetFormatString(filenameFormat, nullptr, nullptr);
-		strPath = GetRecordingFilename(path,
-					       ffmpegOutput ? "avi" : format,
-					       noSpace, overwriteIfExists,
-					       f.c_str(), ffmpegOutput);
+		string strPath = GetRecordingFilename(
+			path, ffmpegOutput ? "avi" : format, noSpace,
+			overwriteIfExists, f.c_str(), ffmpegOutput);
 		obs_data_set_string(settings, ffmpegOutput ? "url" : "path",
 				    strPath.c_str());
+		if (ffmpegOutput)
+			obs_output_set_mixers(fileOutput, tracks);
 	}
 
 	// Use fragmented MOV/MP4 if user has not already specified custom movflags
@@ -1577,7 +1642,7 @@ AdvancedOutput::AdvancedOutput(OBSBasic *main_) : BasicOutputHandler(main_)
 		config_get_int(main->Config(), "AdvOut", "VodTrackIndex") - 1;
 	streamArchiveEnc = obs_audio_encoder_create(streamAudioEncoder,
 						    ADV_ARCHIVE_NAME, nullptr,
-						    streamTrack, nullptr);
+						    vodTrack, nullptr);
 	if (!streamArchiveEnc)
 		throw "Failed to create archive audio encoder "
 		      "(advanced output)";
@@ -1706,11 +1771,9 @@ inline void AdvancedOutput::SetupRecording()
 	int tracks;
 
 	const char *recFormat =
-		config_get_string(main->Config(), "AdvOut", "RecFormat");
+		config_get_string(main->Config(), "AdvOut", "RecFormat2");
 
-	bool is_fragmented = strcmp(recFormat, "fmp4") == 0 ||
-			     strcmp(recFormat, "fmov") == 0;
-
+	bool is_fragmented = strncmp(recFormat, "fragmented", 10) == 0;
 	bool flv = strcmp(recFormat, "flv") == 0;
 
 	if (flv)
@@ -1769,14 +1832,14 @@ inline void AdvancedOutput::SetupRecording()
 
 	// Use fragmented MOV/MP4 if user has not already specified custom movflags
 	if (is_fragmented && (!mux || strstr(mux, "movflags") == NULL)) {
-		string mux_fmp4 =
+		string mux_frag =
 			"movflags=frag_keyframe+empty_moov+delay_moov";
 		if (mux) {
-			mux_fmp4 += " ";
-			mux_fmp4 += mux;
+			mux_frag += " ";
+			mux_frag += mux;
 		}
 		obs_data_set_string(settings, "muxer_settings",
-				    mux_fmp4.c_str());
+				    mux_frag.c_str());
 	} else {
 		if (is_fragmented)
 			blog(LOG_WARNING,
@@ -1975,9 +2038,6 @@ inline void AdvancedOutput::SetupVodTrack(obs_service_t *service)
 
 bool AdvancedOutput::SetupStreaming(obs_service_t *service)
 {
-	int streamTrack =
-		config_get_int(main->Config(), "AdvOut", "TrackIndex");
-
 	if (!useStreamEncoder ||
 	    (!ffmpegOutput && !obs_output_active(fileOutput))) {
 		UpdateStreamSettings();
@@ -2028,9 +2088,6 @@ bool AdvancedOutput::SetupStreaming(obs_service_t *service)
 		stopStreaming.Connect(
 			obs_output_get_signal_handler(streamOutput), "stop",
 			OBSStopStreaming, this);
-
-		bool isEncoded = obs_output_get_flags(streamOutput) &
-				 OBS_OUTPUT_ENCODED;
 
 		outputType = type;
 	}
@@ -2133,7 +2190,7 @@ bool AdvancedOutput::StartRecording()
 							 : "RecFilePath");
 		recFormat = config_get_string(main->Config(), "AdvOut",
 					      ffmpegRecording ? "FFExtension"
-							      : "RecFormat");
+							      : "RecFormat2");
 		filenameFormat = config_get_string(main->Config(), "Output",
 						   "FilenameFormatting");
 		overwriteIfExists = config_get_bool(main->Config(), "Output",
@@ -2144,11 +2201,6 @@ bool AdvancedOutput::StartRecording()
 						  : "RecFileNameWithoutSpace");
 		splitFile = config_get_bool(main->Config(), "AdvOut",
 					    "RecSplitFile");
-
-		// Strip leading "f" in case fragmented format was selected
-		if (strcmp(recFormat, "fmp4") == 0 ||
-		    strcmp(recFormat, "fmov") == 0)
-			++recFormat;
 
 		string strPath = GetRecordingFilename(path, recFormat, noSpace,
 						      overwriteIfExists,
@@ -2174,9 +2226,10 @@ bool AdvancedOutput::StartRecording()
 							 "AdvOut",
 							 "RecSplitFileSize")
 					: 0;
+			string ext = GetFormatExt(recFormat);
 			obs_data_set_string(settings, "directory", path);
 			obs_data_set_string(settings, "format", filenameFormat);
-			obs_data_set_string(settings, "extension", recFormat);
+			obs_data_set_string(settings, "extension", ext.c_str());
 			obs_data_set_bool(settings, "allow_spaces", !noSpace);
 			obs_data_set_bool(settings, "allow_overwrite",
 					  overwriteIfExists);
@@ -2236,7 +2289,7 @@ bool AdvancedOutput::StartReplayBuffer()
 							 : "RecFilePath");
 		recFormat = config_get_string(main->Config(), "AdvOut",
 					      ffmpegRecording ? "FFExtension"
-							      : "RecFormat");
+							      : "RecFormat2");
 		filenameFormat = config_get_string(main->Config(), "Output",
 						   "FilenameFormatting");
 		overwriteIfExists = config_get_bool(main->Config(), "Output",
@@ -2253,14 +2306,13 @@ bool AdvancedOutput::StartReplayBuffer()
 		rbSize = config_get_int(main->Config(), "AdvOut", "RecRBSize");
 
 		string f = GetFormatString(filenameFormat, rbPrefix, rbSuffix);
-		string strPath = GetOutputFilename(
-			path, recFormat, noSpace, overwriteIfExists, f.c_str());
+		string ext = GetFormatExt(recFormat);
 
 		OBSDataAutoRelease settings = obs_data_create();
 
 		obs_data_set_string(settings, "directory", path);
 		obs_data_set_string(settings, "format", f.c_str());
-		obs_data_set_string(settings, "extension", recFormat);
+		obs_data_set_string(settings, "extension", ext.c_str());
 		obs_data_set_bool(settings, "allow_spaces", !noSpace);
 		obs_data_set_int(settings, "max_time_sec", rbTime);
 		obs_data_set_int(settings, "max_size_mb",
@@ -2325,22 +2377,22 @@ bool AdvancedOutput::ReplayBufferActive() const
 
 /* ------------------------------------------------------------------------ */
 
-void BasicOutputHandler::SetupAutoRemux(const char *&ext)
+void BasicOutputHandler::SetupAutoRemux(const char *&container)
 {
 	bool autoRemux = config_get_bool(main->Config(), "Video", "AutoRemux");
-	if (autoRemux && strcmp(ext, "mp4") == 0)
-		ext = "mkv";
+	if (autoRemux && strcmp(container, "mp4") == 0)
+		container = "mkv";
 }
 
-std::string
-BasicOutputHandler::GetRecordingFilename(const char *path, const char *ext,
-					 bool noSpace, bool overwrite,
-					 const char *format, bool ffmpeg)
+std::string BasicOutputHandler::GetRecordingFilename(
+	const char *path, const char *container, bool noSpace, bool overwrite,
+	const char *format, bool ffmpeg)
 {
 	if (!ffmpeg)
-		SetupAutoRemux(ext);
+		SetupAutoRemux(container);
 
-	string dst = GetOutputFilename(path, ext, noSpace, overwrite, format);
+	string dst =
+		GetOutputFilename(path, container, noSpace, overwrite, format);
 	lastRecordingPath = dst;
 	return dst;
 }

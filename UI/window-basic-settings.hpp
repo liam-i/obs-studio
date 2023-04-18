@@ -224,6 +224,7 @@ private:
 	void HookWidget(QWidget *widget, const char *signal, const char *slot);
 
 	bool QueryChanges();
+	bool QueryAllowedToClose();
 
 	void ResetEncoders(bool streamOnly = false);
 	void LoadColorRanges();
@@ -392,7 +393,7 @@ private slots:
 	void on_simpleOutputBrowse_clicked();
 	void on_advOutRecPathBrowse_clicked();
 	void on_advOutFFPathBrowse_clicked();
-	void on_advOutEncoder_currentIndexChanged(int idx);
+	void on_advOutEncoder_currentIndexChanged();
 	void on_advOutRecEncoder_currentIndexChanged(int idx);
 	void on_advOutFFIgnoreCompat_stateChanged(int state);
 	void on_advOutFFFormat_currentIndexChanged(int idx);
@@ -446,6 +447,7 @@ private slots:
 
 	void AdvOutSplitFileChanged();
 	void AdvOutRecCheckWarnings();
+	void AdvOutRecCheckCodecs();
 
 	void SimpleRecordingQualityChanged();
 	void SimpleRecordingEncoderChanged();

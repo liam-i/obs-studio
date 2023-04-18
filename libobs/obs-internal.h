@@ -67,6 +67,11 @@ struct draw_callback {
 	void *param;
 };
 
+struct rendered_callback {
+	void (*rendered)(void *param);
+	void *param;
+};
+
 /* ------------------------------------------------------------------------- */
 /* validity checks */
 
@@ -224,6 +229,7 @@ struct obs_display {
 	pthread_mutex_t draw_callbacks_mutex;
 	pthread_mutex_t draw_info_mutex;
 	DARRAY(struct draw_callback) draw_callbacks;
+	bool use_clear_workaround;
 
 	struct obs_display *next;
 	struct obs_display **prev_next;
@@ -401,6 +407,7 @@ struct obs_core_data {
 	pthread_mutex_t audio_sources_mutex;
 	pthread_mutex_t draw_callbacks_mutex;
 	DARRAY(struct draw_callback) draw_callbacks;
+	DARRAY(struct rendered_callback) rendered_callbacks;
 	DARRAY(struct tick_callback) tick_callbacks;
 
 	struct obs_view main_view;
@@ -946,6 +953,7 @@ convert_video_format(enum video_format format, enum video_trc trc)
 		case VIDEO_FORMAT_YA2L:
 		case VIDEO_FORMAT_P216:
 		case VIDEO_FORMAT_P416:
+		case VIDEO_FORMAT_V210:
 			return GS_RGBA16F;
 		default:
 			return GS_BGRX;

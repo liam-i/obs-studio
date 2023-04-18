@@ -1076,6 +1076,7 @@ static void obs_free_data(void)
 	pthread_mutex_destroy(&data->services_mutex);
 	pthread_mutex_destroy(&data->draw_callbacks_mutex);
 	da_free(data->draw_callbacks);
+	da_free(data->rendered_callbacks);
 	da_free(data->tick_callbacks);
 	obs_data_release(data->private_data);
 
@@ -1282,6 +1283,9 @@ char *obs_find_data_file(const char *file)
 		if (check_path(file, core_module_paths.array[i].array, &path))
 			return path.array;
 	}
+
+	blog(LOG_ERROR, "Failed to find file '%s' in libobs data directory",
+	     file);
 
 	dstr_free(&path);
 	return NULL;
@@ -2119,7 +2123,14 @@ obs_source_t *obs_get_transition_by_name(const char *name)
 
 obs_source_t *obs_get_transition_by_uuid(const char *uuid)
 {
-	return obs_get_source_by_uuid(uuid);
+	obs_source_t *source = obs_get_source_by_uuid(uuid);
+
+	if (source && source->info.type == OBS_SOURCE_TYPE_TRANSITION)
+		return source;
+	else if (source)
+		obs_source_release(source);
+
+	return NULL;
 }
 
 obs_output_t *obs_get_output_by_name(const char *name)
@@ -3066,6 +3077,25 @@ void obs_remove_main_render_callback(void (*draw)(void *param, uint32_t cx,
 
 	pthread_mutex_lock(&obs->data.draw_callbacks_mutex);
 	da_erase_item(obs->data.draw_callbacks, &data);
+	pthread_mutex_unlock(&obs->data.draw_callbacks_mutex);
+}
+
+void obs_add_main_rendered_callback(void (*rendered)(void *param), void *param)
+{
+	struct rendered_callback data = {rendered, param};
+
+	pthread_mutex_lock(&obs->data.draw_callbacks_mutex);
+	da_insert(obs->data.rendered_callbacks, 0, &data);
+	pthread_mutex_unlock(&obs->data.draw_callbacks_mutex);
+}
+
+void obs_remove_main_rendered_callback(void (*rendered)(void *param),
+				       void *param)
+{
+	struct rendered_callback data = {rendered, param};
+
+	pthread_mutex_lock(&obs->data.draw_callbacks_mutex);
+	da_erase_item(obs->data.rendered_callbacks, &data);
 	pthread_mutex_unlock(&obs->data.draw_callbacks_mutex);
 }
 
