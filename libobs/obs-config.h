@@ -1,5 +1,5 @@
 /******************************************************************************
-    Copyright (C) 2014 by Hugh Bailey <obs.jim@gmail.com>
+    Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -41,7 +41,7 @@
  *
  * Reset to zero each major or minor version
  */
-#define LIBOBS_API_PATCH_VER 1
+#define LIBOBS_API_PATCH_VER 3
 
 #define MAKE_SEMANTIC_VERSION(major, minor, patch) \
 	((major << 24) | (minor << 16) | patch)

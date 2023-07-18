@@ -77,7 +77,8 @@ struct SceneFindData {
 	SceneFindData &operator=(SceneFindData &&) = delete;
 
 	inline SceneFindData(const vec2 &pos_, bool selectBelow_)
-		: pos(pos_), selectBelow(selectBelow_)
+		: pos(pos_),
+		  selectBelow(selectBelow_)
 	{
 	}
 };
@@ -93,7 +94,8 @@ struct SceneFindBoxData {
 	SceneFindBoxData &operator=(SceneFindData &&) = delete;
 
 	inline SceneFindBoxData(const vec2 &startPos_, const vec2 &pos_)
-		: startPos(startPos_), pos(pos_)
+		: startPos(startPos_),
+		  pos(pos_)
 	{
 	}
 };
@@ -314,7 +316,8 @@ struct HandleFindData {
 	HandleFindData &operator=(HandleFindData &&) = delete;
 
 	inline HandleFindData(const vec2 &pos_, float scale)
-		: pos(pos_), radius(HANDLE_SEL_RADIUS / scale)
+		: pos(pos_),
+		  radius(HANDLE_SEL_RADIUS / scale)
 	{
 		matrix4_identity(&parent_xform);
 	}
@@ -573,11 +576,7 @@ void OBSBasicPreview::wheelEvent(QWheelEvent *event)
 
 void OBSBasicPreview::mousePressEvent(QMouseEvent *event)
 {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 	QPointF pos = event->position();
-#else
-	QPointF pos = event->localPos();
-#endif
 
 	if (scrollMode && IsFixedScaling() &&
 	    event->button() == Qt::LeftButton) {
@@ -794,8 +793,8 @@ void OBSBasicPreview::mouseReleaseEvent(QMouseEvent *event)
 	auto undo_redo = [](const std::string &data) {
 		OBSDataAutoRelease dat =
 			obs_data_create_from_json(data.c_str());
-		OBSSourceAutoRelease source = obs_get_source_by_name(
-			obs_data_get_string(dat, "scene_name"));
+		OBSSourceAutoRelease source = obs_get_source_by_uuid(
+			obs_data_get_string(dat, "scene_uuid"));
 		reinterpret_cast<OBSBasic *>(App()->GetMainWindow())
 			->SetCurrentScene(source.Get(), true);
 
@@ -1492,9 +1491,17 @@ void OBSBasicPreview::StretchItem(const vec2 &pos)
 
 	obs_source_t *source = obs_sceneitem_get_source(stretchItem);
 
+	uint32_t source_cx = obs_source_get_width(source);
+	uint32_t source_cy = obs_source_get_height(source);
+
+	/* if the source's internal size has been set to 0 for whatever reason
+	 * while resizing, do not update transform, otherwise source will be
+	 * stuck invisible until a complete transform reset */
+	if (!source_cx || !source_cy)
+		return;
+
 	vec2 baseSize;
-	vec2_set(&baseSize, float(obs_source_get_width(source)),
-		 float(obs_source_get_height(source)));
+	vec2_set(&baseSize, float(source_cx), float(source_cy));
 
 	vec2 size;
 	vec2_set(&size, br.x - tl.x, br.y - tl.y);
@@ -1587,11 +1594,7 @@ void OBSBasicPreview::mouseMoveEvent(QMouseEvent *event)
 	OBSBasic *main = reinterpret_cast<OBSBasic *>(App()->GetMainWindow());
 	changed = true;
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 	QPointF qtPos = event->position();
-#else
-	QPointF qtPos = event->localPos();
-#endif
 
 	float pixelRatio = main->GetDevicePixelRatio();
 

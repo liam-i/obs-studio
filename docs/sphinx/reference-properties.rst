@@ -51,7 +51,9 @@ General Functions
                  - OBS_PROPERTIES_DEFER_UPDATE - A hint that tells the
                    front-end to defers updating the settings until the
                    user has finished editing all properties rather than
-                   immediately updating any settings
+                   immediately updating any settings. Currently only
+                   works for properties of input and transition sources,
+                   this flag is a no-op for other properties at this time.
 
 ---------------------
 
@@ -194,7 +196,8 @@ Property Object Functions
 
                           - **OBS_COMBO_TYPE_EDITABLE** - Can be edited.
                             Only used with string lists.
-                          - **OBS_COMBO_TYPE_LIST** - Not editable.
+                          - **OBS_COMBO_TYPE_LIST** - Not editable. Displayed as combo box.
+                          - **OBS_COMBO_TYPE_RADIO** - Not editable. Displayed as radio buttons.
 
    :param    format:      Can be one of the following values:
 
@@ -202,6 +205,7 @@ Property Object Functions
                           - **OBS_COMBO_FORMAT_FLOAT** - Floating point
                             list
                           - **OBS_COMBO_FORMAT_STRING** - String list
+                          - **OBS_COMBO_FORMAT_BOOL** - Boolean list
 
    :return:               The property
 
@@ -241,13 +245,16 @@ Property Object Functions
 ---------------------
 
 .. function:: obs_property_t *obs_properties_add_button(obs_properties_t *props, const char *name, const char *text, obs_property_clicked_t callback)
+              obs_property_t *obs_properties_add_button2(obs_properties_t *props, const char *name, const char *text, obs_property_clicked_t callback, void *priv)
 
    Adds a button property.  This property does not actually store any
    settings; it's used to implement a button in user interface if the
    properties are used to generate user interface.
 
    :param    name:        Setting identifier string
-   :param    description: Localized name shown to user
+   :param    text:        Localized name shown to user
+   :param    callback:    Callback to be executed when the button is pressed
+   :param    priv:        Pointer passed back as the `data` argument of the callback
    :return:               The property
 
    Important Related Functions:

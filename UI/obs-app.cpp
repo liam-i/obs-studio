@@ -1,5 +1,5 @@
 /******************************************************************************
-    Copyright (C) 2013 by Hugh Bailey <obs.jim@gmail.com>
+    Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -98,9 +98,6 @@ bool opt_start_virtualcam = false;
 bool opt_minimize_tray = false;
 bool opt_allow_opengl = false;
 bool opt_always_on_top = false;
-#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
-bool opt_disable_high_dpi_scaling = false;
-#endif
 bool opt_disable_updater = false;
 bool opt_disable_missing_files_check = false;
 string opt_starting_collection;
@@ -1393,7 +1390,8 @@ std::vector<UpdateBranch> OBSApp::GetBranches()
 }
 
 OBSApp::OBSApp(int &argc, char **argv, profiler_name_store_t *store)
-	: QApplication(argc, argv), profilerNameStore(store)
+	: QApplication(argc, argv),
+	  profilerNameStore(store)
 {
 	/* fix float handling */
 #if defined(Q_OS_UNIX)
@@ -1659,10 +1657,6 @@ bool OBSApp::OBSInit()
 {
 	ProfileScope("OBSApp::OBSInit");
 
-#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
-	setAttribute(Qt::AA_UseHighDpiPixmaps);
-#endif
-
 	qRegisterMetaType<VoidFunc>("VoidFunc");
 
 #if !defined(_WIN32) && !defined(__APPLE__)
@@ -1743,7 +1737,7 @@ string OBSApp::GetVersionString(bool platform) const
 	stringstream ver;
 
 #ifdef HAVE_OBSCONFIG_H
-	ver << OBS_VERSION;
+	ver << obs_get_version_string();
 #else
 	ver << LIBOBS_API_MAJOR_VER << "." << LIBOBS_API_MINOR_VER << "."
 	    << LIBOBS_API_PATCH_VER;
@@ -2319,13 +2313,7 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 
 	ScopeProfiler prof{run_program_init};
 
-#if (QT_VERSION >= QT_VERSION_CHECK(5, 11, 0)) && \
-	(QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
-	QGuiApplication::setAttribute(opt_disable_high_dpi_scaling
-					      ? Qt::AA_DisableHighDpiScaling
-					      : Qt::AA_EnableHighDpiScaling);
-#endif
-#if (QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)) && defined(_WIN32)
+#ifdef _WIN32
 	QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
 		Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
 #endif
@@ -2466,6 +2454,32 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 
 		if (!created_log)
 			create_log_file(logFile);
+
+		qInstallMessageHandler([](QtMsgType type,
+					  const QMessageLogContext &,
+					  const QString &message) {
+			switch (type) {
+#ifdef _DEBUG
+			case QtDebugMsg:
+				blog(LOG_DEBUG, "%s", QT_TO_UTF8(message));
+				break;
+			case QtInfoMsg:
+				blog(LOG_INFO, "%s", QT_TO_UTF8(message));
+				break;
+#else
+			case QtDebugMsg:
+			case QtInfoMsg:
+				break;
+#endif
+			case QtWarningMsg:
+				blog(LOG_WARNING, "%s", QT_TO_UTF8(message));
+				break;
+			case QtCriticalMsg:
+			case QtFatalMsg:
+				blog(LOG_ERROR, "%s", QT_TO_UTF8(message));
+				break;
+			}
+		});
 
 #ifdef __APPLE__
 		MacPermissionStatus audio_permission =
@@ -2812,39 +2826,6 @@ static inline bool arg_is(const char *arg, const char *long_form,
 	return (long_form && strcmp(arg, long_form) == 0) ||
 	       (short_form && strcmp(arg, short_form) == 0);
 }
-
-#if !defined(_WIN32) && !defined(__APPLE__)
-#define IS_UNIX 1
-#endif
-
-/* if using XDG and was previously using an older build of OBS, move config
- * files to XDG directory */
-#if defined(USE_XDG) && defined(IS_UNIX)
-static void move_to_xdg(void)
-{
-	char old_path[512];
-	char new_path[512];
-	char *home = getenv("HOME");
-	if (!home)
-		return;
-
-	if (snprintf(old_path, sizeof(old_path), "%s/.obs-studio", home) <= 0)
-		return;
-
-	/* make base xdg path if it doesn't already exist */
-	if (GetConfigPath(new_path, sizeof(new_path), "") <= 0)
-		return;
-	if (os_mkdirs(new_path) == MKDIR_ERROR)
-		return;
-
-	if (GetConfigPath(new_path, sizeof(new_path), "obs-studio") <= 0)
-		return;
-
-	if (os_file_exists(old_path) && !os_file_exists(new_path)) {
-		rename(old_path, new_path);
-	}
-}
-#endif
 
 static bool update_ffmpeg_output(ConfigFile &config)
 {
@@ -3238,7 +3219,8 @@ void OBSApp::ProcessSigInt(void)
 	recv(sigintFd[1], &tmp, sizeof(tmp), 0);
 
 	OBSBasic *main = reinterpret_cast<OBSBasic *>(GetMainWindow());
-	main->close();
+	if (main)
+		main->close();
 #endif
 }
 
@@ -3286,10 +3268,6 @@ int main(int argc, char *argv[])
 #endif
 
 	base_get_log_handler(&def_log_handler, nullptr);
-
-#if defined(USE_XDG) && defined(IS_UNIX)
-	move_to_xdg();
-#endif
 
 	obs_set_cmdline_args(argc, argv);
 
@@ -3354,11 +3332,6 @@ int main(int argc, char *argv[])
 		} else if (arg_is(argv[i], "--steam", nullptr)) {
 			steam = true;
 
-#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
-		} else if (arg_is(argv[i], "--disable-high-dpi-scaling",
-				  nullptr)) {
-			opt_disable_high_dpi_scaling = true;
-#endif
 		} else if (arg_is(argv[i], "--help", "-h")) {
 			std::string help =
 				"--help, -h: Get list of available commands.\n\n"
@@ -3380,11 +3353,7 @@ int main(int argc, char *argv[])
 				"--always-on-top: Start in 'always on top' mode.\n\n"
 				"--unfiltered_log: Make log unfiltered.\n\n"
 				"--disable-updater: Disable built-in updater (Windows/Mac only)\n\n"
-				"--disable-missing-files-check: Disable the missing files dialog which can appear on startup.\n\n"
-#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
-				"--disable-high-dpi-scaling: Disable automatic high-DPI scaling\n\n"
-#endif
-				;
+				"--disable-missing-files-check: Disable the missing files dialog which can appear on startup.\n\n";
 
 #ifdef _WIN32
 			MessageBoxA(NULL, help.c_str(), "Help",

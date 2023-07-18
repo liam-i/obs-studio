@@ -167,8 +167,11 @@ static void OBSStopVirtualCam(void *data, calldata_t *params)
 	os_atomic_set_bool(&virtualcam_active, false);
 	QMetaObject::invokeMethod(output->main, "OnVirtualCamStop",
 				  Q_ARG(int, code));
+}
 
-	obs_output_set_media(output->virtualCam, nullptr, nullptr);
+static void OBSDeactivateVirtualCam(void *data, calldata_t * /* params */)
+{
+	BasicOutputHandler *output = static_cast<BasicOutputHandler *>(data);
 	output->DestroyVirtualCamView();
 }
 
@@ -293,6 +296,8 @@ inline BasicOutputHandler::BasicOutputHandler(OBSBasic *main_) : main(main_)
 		startVirtualCam.Connect(signal, "start", OBSStartVirtualCam,
 					this);
 		stopVirtualCam.Connect(signal, "stop", OBSStopVirtualCam, this);
+		deactivateVirtualCam.Connect(signal, "deactivate",
+					     OBSDeactivateVirtualCam, this);
 	}
 }
 
@@ -301,13 +306,17 @@ bool BasicOutputHandler::StartVirtualCam()
 	if (!main->vcamEnabled)
 		return false;
 
-	if (!virtualCamView)
+	bool typeIsProgram = main->vcamConfig.type ==
+			     VCamOutputType::ProgramView;
+
+	if (!virtualCamView && !typeIsProgram)
 		virtualCamView = obs_view_create();
 
 	UpdateVirtualCamOutputSource();
 
 	if (!virtualCamVideo) {
-		virtualCamVideo = obs_view_add(virtualCamView);
+		virtualCamVideo = typeIsProgram ? obs_get_video()
+						: obs_view_add(virtualCamView);
 
 		if (!virtualCamVideo)
 			return false;
@@ -318,8 +327,22 @@ bool BasicOutputHandler::StartVirtualCam()
 		SetupOutputs();
 
 	bool success = obs_output_start(virtualCam);
-	if (!success)
+	if (!success) {
+		QString errorReason;
+
+		const char *error = obs_output_get_last_error(virtualCam);
+		if (error) {
+			errorReason = QT_UTF8(error);
+		} else {
+			errorReason = QTStr("Output.StartFailedGeneric");
+		}
+
+		QMessageBox::critical(main,
+				      QTStr("Output.StartVirtualCamFailed"),
+				      errorReason);
+
 		DestroyVirtualCamView();
+	}
 
 	return success;
 }
@@ -347,23 +370,23 @@ void BasicOutputHandler::UpdateVirtualCamOutputSource()
 	OBSSourceAutoRelease source;
 
 	switch (main->vcamConfig.type) {
-	case VCamOutputType::InternalOutput:
-		switch (main->vcamConfig.internal) {
-		case VCamInternalType::Default:
-			source = obs_get_output_source(0);
-			break;
-		case VCamInternalType::Preview:
-			OBSSource s = main->GetCurrentSceneSource();
-			obs_source_get_ref(s);
-			source = s.Get();
-			break;
-		}
+	case VCamOutputType::Invalid:
+	case VCamOutputType::ProgramView:
+		DestroyVirtualCameraScene();
+		return;
+	case VCamOutputType::PreviewOutput: {
+		DestroyVirtualCameraScene();
+		OBSSource s = main->GetCurrentSceneSource();
+		obs_source_get_ref(s);
+		source = s.Get();
 		break;
+	}
 	case VCamOutputType::SceneOutput:
+		DestroyVirtualCameraScene();
 		source = obs_get_source_by_name(main->vcamConfig.scene.c_str());
 		break;
 	case VCamOutputType::SourceOutput:
-		OBSSource s =
+		OBSSourceAutoRelease s =
 			obs_get_source_by_name(main->vcamConfig.source.c_str());
 
 		if (!vCamSourceScene)
@@ -380,7 +403,6 @@ void BasicOutputHandler::UpdateVirtualCamOutputSource()
 
 		if (!vCamSourceSceneItem) {
 			vCamSourceSceneItem = obs_scene_add(vCamSourceScene, s);
-			obs_source_release(s);
 
 			obs_sceneitem_set_bounds_type(vCamSourceSceneItem,
 						      OBS_BOUNDS_SCALE_INNER);
@@ -403,6 +425,11 @@ void BasicOutputHandler::UpdateVirtualCamOutputSource()
 
 void BasicOutputHandler::DestroyVirtualCamView()
 {
+	if (main->vcamConfig.type == VCamOutputType::ProgramView) {
+		virtualCamVideo = nullptr;
+		return;
+	}
+
 	obs_view_remove(virtualCamView);
 	obs_view_set_source(virtualCamView, 0, nullptr);
 	virtualCamVideo = nullptr;
@@ -410,6 +437,11 @@ void BasicOutputHandler::DestroyVirtualCamView()
 	obs_view_destroy(virtualCamView);
 	virtualCamView = nullptr;
 
+	DestroyVirtualCameraScene();
+}
+
+void BasicOutputHandler::DestroyVirtualCameraScene()
+{
 	if (!vCamSourceScene)
 		return;
 
@@ -1298,6 +1330,7 @@ bool SimpleOutput::ConfigureRecording(bool updateReplayBuffer)
 		config_get_int(main->Config(), "SimpleOutput", "RecTracks");
 
 	bool is_fragmented = strncmp(format, "fragmented", 10) == 0;
+	bool is_lossless = videoQuality == "Lossless";
 
 	string f;
 
@@ -1324,7 +1357,8 @@ bool SimpleOutput::ConfigureRecording(bool updateReplayBuffer)
 	}
 
 	// Use fragmented MOV/MP4 if user has not already specified custom movflags
-	if (is_fragmented && (!mux || strstr(mux, "movflags") == NULL)) {
+	if (is_fragmented && !is_lossless &&
+	    (!mux || strstr(mux, "movflags") == NULL)) {
 		string mux_frag =
 			"movflags=frag_keyframe+empty_moov+delay_moov";
 		if (mux) {
@@ -1334,7 +1368,7 @@ bool SimpleOutput::ConfigureRecording(bool updateReplayBuffer)
 		obs_data_set_string(settings, "muxer_settings",
 				    mux_frag.c_str());
 	} else {
-		if (is_fragmented)
+		if (is_fragmented && !is_lossless)
 			blog(LOG_WARNING,
 			     "User enabled fragmented recording, "
 			     "but custom muxer settings contained movflags.");
@@ -1786,6 +1820,10 @@ inline void AdvancedOutput::SetupRecording()
 	unsigned int cy = 0;
 	int idx = 0;
 
+	/* Hack to allow recordings without any audio tracks selected. It is no
+	 * longer possible to select such a configuration in settings, but legacy
+	 * configurations might still have this configured and we don't want to
+	 * just break them. */
 	if (tracks == 0)
 		tracks = config_get_int(main->Config(), "AdvOut", "TrackIndex");
 

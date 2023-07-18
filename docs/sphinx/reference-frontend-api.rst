@@ -129,7 +129,10 @@ Structures/Enumerations
 
    - **OBS_FRONTEND_EVENT_EXIT**
 
-     Triggered when the program is about to exit.
+     Triggered when the program is about to exit. This is the last chance
+     to call any frontend API functions for any saving / cleanup / etc.
+     After returning from this event callback, it is not permitted to make
+     any further frontend API calls.
 
    - **OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTING**
 
@@ -361,7 +364,7 @@ Functions
 
 .. function:: void obs_frontend_set_current_scene_collection(const char *collection)
 
-   :param profile: Name of the scene collection to activate
+   :param collection: Name of the scene collection to activate
 
 ---------------------------------------
 
@@ -446,6 +449,48 @@ Functions
 
    :param dock: QDockWidget to add/create
    :return: A pointer to the added QAction
+
+.. deprecated:: 29.1
+   Prefer :c:func:`obs_frontend_add_dock_by_id()` or
+   :c:func:`obs_frontend_add_custom_qdock()` instead.
+
+---------------------------------------
+
+.. function:: bool obs_frontend_add_dock_by_id(const char *id, const char *title, void *widget)
+
+   Adds a dock with the widget to the UI with a toggle in the Docks
+   menu.
+
+   Note: Use :c:func:`obs_frontend_remove_dock` to remove the dock
+         and the id from the UI.
+
+   :param id: Unique identifier of the dock
+   :param title: Window title of the dock
+   :param widget: QWidget to insert in the dock
+   :return: *true* if the dock was added, *false* if the id was already
+            used
+
+---------------------------------------
+
+.. function:: void obs_frontend_remove_dock(const char *id)
+
+   Removes the dock with this id from the UI.
+
+   :param id: Unique identifier of the dock to remove.
+
+---------------------------------------
+
+.. function:: bool obs_frontend_add_custom_qdock(const char *id, void *dock)
+
+   Adds a custom dock to the UI with no toggle.
+
+   Note: Use :c:func:`obs_frontend_remove_dock` to remove the dock
+         reference and id from the UI.
+
+   :param id: Unique identifier of the dock
+   :param dock: QDockWidget to add
+   :return: *true* if the dock was added, *false* if the id was already
+            used
 
 ---------------------------------------
 
@@ -806,6 +851,8 @@ Functions
 
    :param item: The sceneitem to open the edit transform window of
 
+   .. versionadded:: 29.1
+
 ---------------------------------------
 
 .. function:: char *obs_frontend_get_current_record_output_path(void)
@@ -864,3 +911,5 @@ Functions
    :param redo_data: String with data for the redo callback
    :param repeatable: Allow multiple actions with the same name to be merged to 1 undo redo action.
                       This uses the undo action from the first and the redo action from the last action.
+
+   .. versionadded:: 29.1

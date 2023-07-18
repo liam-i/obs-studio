@@ -1,5 +1,5 @@
 /******************************************************************************
-    Copyright (C) 2013-2014 by Hugh Bailey <obs.jim@gmail.com>
+    Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -229,6 +229,7 @@ private:
 	std::vector<OBSSignal> signalHandlers;
 
 	QList<QPointer<QDockWidget>> oldExtraDocks;
+	QStringList oldExtraDockNames;
 
 	bool loaded = false;
 	long disableSaving = 1;
@@ -556,6 +557,9 @@ private:
 	QStringList extraDockNames;
 	QList<QSharedPointer<QDockWidget>> extraDocks;
 
+	QStringList extraCustomDockNames;
+	QList<QPointer<QDockWidget>> extraCustomDocks;
+
 #ifdef BROWSER_AVAILABLE
 	QPointer<QAction> extraBrowserMenuDocksSeparator;
 
@@ -622,7 +626,7 @@ private:
 	bool broadcastActive = false;
 	bool broadcastReady = false;
 	QPointer<QThread> youtubeStreamCheckThread;
-#if YOUTUBE_ENABLED
+#ifdef YOUTUBE_ENABLED
 	void YoutubeStreamCheck(const std::string &key);
 	void ShowYouTubeAutoStartWarning();
 	void YouTubeActionDialogOk(const QString &id, const QString &key,
@@ -655,6 +659,10 @@ private:
 	std::string lastReplay;
 
 	void UpdatePreviewOverflowSettings();
+
+	bool restartingVCam = false;
+
+	void UpdateTransformShortcuts();
 
 public slots:
 	void DeferSaveBegin();
@@ -827,9 +835,11 @@ private slots:
 	void TBarReleased();
 
 	void LockVolumeControl(bool lock);
-	void ResetProxyStyleSliders();
+	void ThemeChanged();
 
 	void UpdateVirtualCamConfig(const VCamConfig &config);
+	void RestartVirtualCam(const VCamConfig &config);
+	void RestartingVirtualCam();
 
 private:
 	/* OBS Callbacks */
@@ -966,6 +976,8 @@ public:
 	void AddDockWidget(QDockWidget *dock, Qt::DockWidgetArea area,
 			   bool extraBrowser = false);
 	void RemoveDockWidget(const QString &name);
+	bool IsDockObjectNameUsed(const QString &name);
+	void AddCustomDockWidget(QDockWidget *dock);
 
 	static OBSBasic *Get();
 
@@ -1010,13 +1022,8 @@ public:
 
 protected:
 	virtual void closeEvent(QCloseEvent *event) override;
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 	virtual bool nativeEvent(const QByteArray &eventType, void *message,
 				 qintptr *result) override;
-#else
-	virtual bool nativeEvent(const QByteArray &eventType, void *message,
-				 long *result) override;
-#endif
 	virtual void changeEvent(QEvent *event) override;
 
 private slots:
@@ -1062,6 +1069,8 @@ private slots:
 					  QListWidgetItem *prev);
 	void on_scenes_customContextMenuRequested(const QPoint &pos);
 	void GridActionClicked();
+	void on_actionSceneListMode_triggered();
+	void on_actionSceneGridMode_triggered();
 	void on_actionAddScene_triggered();
 	void on_actionRemoveScene_triggered();
 	void on_actionSceneUp_triggered();
@@ -1152,6 +1161,7 @@ private slots:
 	void on_resetDocks_triggered(bool force = false);
 	void on_lockDocks_toggled(bool lock);
 	void on_multiviewProjectorWindowed_triggered();
+	void on_sideDocks_toggled(bool side);
 
 	void PauseToggled();
 
@@ -1194,6 +1204,9 @@ private slots:
 	void StackedMixerAreaContextMenuRequested();
 
 	void ResizeOutputSizeOfSource();
+
+	void RepairOldExtraDockName();
+	void RepairCustomExtraDockName();
 
 public slots:
 	void on_actionResetTransform_triggered();

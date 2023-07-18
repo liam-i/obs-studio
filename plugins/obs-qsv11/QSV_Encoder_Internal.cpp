@@ -56,9 +56,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "QSV_Encoder_Internal.h"
 #include "QSV_Encoder.h"
-#include "mfxastructures.h"
-#include "mfxvideo++.h"
-#include <VersionHelpers.h>
+#include <mfxvideo++.h>
 #include <obs-module.h>
 
 #define do_log(level, format, ...) \
@@ -87,49 +85,36 @@ QSV_Encoder_Internal::QSV_Encoder_Internal(mfxIMPL &impl, mfxVersion &version,
 	mfxIMPL tempImpl;
 	mfxStatus sts;
 
-	m_bIsWindows8OrGreater = IsWindows8OrGreater();
-	m_bUseD3D11 = false;
+#if defined(_WIN32)
+	m_bUseD3D11 = true;
 	m_bD3D9HACK = true;
+	m_bUseTexAlloc = true;
 
-	if (m_bIsWindows8OrGreater) {
-		tempImpl = impl | MFX_IMPL_VIA_D3D11;
-		sts = m_session.Init(tempImpl, &version);
-		if (sts == MFX_ERR_NONE) {
-			m_session.QueryVersion(&version);
-			m_session.Close();
+	tempImpl = impl | MFX_IMPL_VIA_D3D11;
+	const char *sImpl = "D3D11";
+#else
+	m_bUseTexAlloc = false;
+	tempImpl = impl | MFX_IMPL_VIA_VAAPI;
+	const char *sImpl = "VAAPI";
+#endif
+	sts = m_session.Init(tempImpl, &version);
+	if (sts == MFX_ERR_NONE) {
+		m_session.QueryVersion(&version);
+		m_session.Close();
 
-			// Use D3D11 surface
-			// m_bUseD3D11 = ((version.Major > 1) ||
-			//	(version.Major == 1 && version.Minor >= 8));
-			m_bUseD3D11 = true;
-			if (m_bUseD3D11)
-				blog(LOG_INFO, "\timpl:           D3D11\n"
-					       "\tsurf:           D3D11");
-			else
-				blog(LOG_INFO, "\timpl:           D3D11\n"
-					       "\tsurf:           SysMem");
+		blog(LOG_INFO,
+		     "\timpl:           %s\n"
+		     "\tsurf:           %s",
+		     sImpl, m_bUseTexAlloc ? "Texture" : "SysMem");
 
-			m_impl = tempImpl;
-			m_ver = version;
-			return;
-		}
-	} else if (m_bD3D9HACK) {
-		tempImpl = impl | MFX_IMPL_VIA_D3D9;
-		sts = m_session.Init(tempImpl, &version);
-		if (sts == MFX_ERR_NONE) {
-			m_session.QueryVersion(&version);
-			m_session.Close();
-
-			blog(LOG_INFO, "\timpl:           D3D09\n"
-				       "\tsurf:           Hack");
-
-			m_impl = tempImpl;
-			m_ver = version;
-			return;
-		}
+		m_impl = tempImpl;
+		m_ver = version;
+		return;
 	}
 
-	// Either windows 7 or D3D11 failed at this point.
+#if defined(_WIN32)
+	// D3D11 failed at this point.
+	m_bUseD3D11 = false;
 	tempImpl = impl | MFX_IMPL_VIA_D3D9;
 	sts = m_session.Init(tempImpl, &version);
 	if (sts == MFX_ERR_NONE) {
@@ -141,7 +126,9 @@ QSV_Encoder_Internal::QSV_Encoder_Internal(mfxIMPL &impl, mfxVersion &version,
 
 		m_impl = tempImpl;
 		m_ver = version;
+		m_bUseD3D11 = false;
 	}
+#endif
 }
 
 QSV_Encoder_Internal::~QSV_Encoder_Internal()
@@ -154,6 +141,7 @@ mfxStatus QSV_Encoder_Internal::Open(qsv_param_t *pParams, enum qsv_codec codec)
 {
 	mfxStatus sts = MFX_ERR_NONE;
 
+#if defined(_WIN32)
 	if (m_bUseD3D11)
 		// Use D3D11 surface
 		sts = Initialize(m_impl, m_ver, &m_session, &m_mfxAllocator,
@@ -164,6 +152,9 @@ mfxStatus QSV_Encoder_Internal::Open(qsv_param_t *pParams, enum qsv_codec codec)
 				 &g_DX_Handle, false, true);
 	else
 		sts = Initialize(m_impl, m_ver, &m_session, NULL);
+#else
+	sts = Initialize(m_impl, m_ver, &m_session, NULL, NULL, false, false);
+#endif
 
 	MSDK_CHECK_RESULT(sts, MFX_ERR_NONE, sts);
 
@@ -239,6 +230,8 @@ mfxStatus QSV_Encoder_Internal::InitParams(qsv_param_t *pParams,
 	if (codec == QSV_CODEC_HEVC)
 		m_mfxEncParams.mfx.LowPower = MFX_CODINGOPTION_OFF;
 
+#if defined(_WIN32)
+	// TODO: Why isn't LowPower coding supported on VAAPI backend.
 	enum qsv_cpu_platform qsv_platform = qsv_get_cpu_platform();
 	if ((m_isDGPU || qsv_platform >= QSV_CPU_PLATFORM_ICL ||
 	     qsv_platform == QSV_CPU_PLATFORM_UNKNOWN) &&
@@ -250,6 +243,7 @@ mfxStatus QSV_Encoder_Internal::InitParams(qsv_param_t *pParams,
 		    pParams->nRateControl == MFX_RATECONTROL_LA)
 			pParams->nRateControl = MFX_RATECONTROL_VBR;
 	}
+#endif
 
 	m_mfxEncParams.mfx.RateControlMethod = pParams->nRateControl;
 
@@ -346,6 +340,8 @@ mfxStatus QSV_Encoder_Internal::InitParams(qsv_param_t *pParams,
 		}
 	}
 
+#if defined(_WIN32)
+	// TODO: Ask about this one on VAAPI too.
 	memset(&m_ExtVideoSignalInfo, 0, sizeof(m_ExtVideoSignalInfo));
 	m_ExtVideoSignalInfo.Header.BufferId = MFX_EXTBUFF_VIDEO_SIGNAL_INFO;
 	m_ExtVideoSignalInfo.Header.BufferSz = sizeof(m_ExtVideoSignalInfo);
@@ -357,6 +353,7 @@ mfxStatus QSV_Encoder_Internal::InitParams(qsv_param_t *pParams,
 		pParams->TransferCharacteristics;
 	m_ExtVideoSignalInfo.MatrixCoefficients = pParams->MatrixCoefficients;
 	extendedBuffers.push_back((mfxExtBuffer *)&m_ExtVideoSignalInfo);
+#endif
 
 /* TODO: Ask Intel why this is MFX_ERR_UNSUPPORTED */
 #if 0
@@ -425,7 +422,7 @@ mfxStatus QSV_Encoder_Internal::InitParams(qsv_param_t *pParams,
 	m_mfxEncParams.mfx.FrameInfo.Width = MSDK_ALIGN16(pParams->nWidth);
 	m_mfxEncParams.mfx.FrameInfo.Height = MSDK_ALIGN16(pParams->nHeight);
 
-	if (m_bUseD3D11 || m_bD3D9HACK)
+	if (m_bUseTexAlloc)
 		m_mfxEncParams.IOPattern = MFX_IOPATTERN_IN_VIDEO_MEMORY;
 	else
 		m_mfxEncParams.IOPattern = MFX_IOPATTERN_IN_SYSTEM_MEMORY;
@@ -433,7 +430,12 @@ mfxStatus QSV_Encoder_Internal::InitParams(qsv_param_t *pParams,
 	m_mfxEncParams.ExtParam = extendedBuffers.data();
 	m_mfxEncParams.NumExtParam = (mfxU16)extendedBuffers.size();
 
-	mfxStatus sts = m_pmfxENC->Query(&m_mfxEncParams, &m_mfxEncParams);
+	// We don't check what was valid or invalid here, just try changing LowPower.
+	// Ensure set values are not overwritten so in case it wasn't lowPower we fail
+	// during the parameter check.
+	mfxVideoParam validParams = {0};
+	memcpy(&validParams, &m_mfxEncParams, sizeof(validParams));
+	mfxStatus sts = m_pmfxENC->Query(&m_mfxEncParams, &validParams);
 	if (sts == MFX_ERR_UNSUPPORTED || sts == MFX_ERR_UNDEFINED_BEHAVIOR) {
 		if (m_mfxEncParams.mfx.LowPower == MFX_CODINGOPTION_ON) {
 			m_mfxEncParams.mfx.LowPower = MFX_CODINGOPTION_OFF;
@@ -475,7 +477,7 @@ mfxStatus QSV_Encoder_Internal::AllocateSurfaces()
 	EncRequest.NumFrameSuggested += m_mfxEncParams.AsyncDepth;
 
 	// Allocate required surfaces
-	if (m_bUseD3D11 || m_bD3D9HACK) {
+	if (m_bUseTexAlloc) {
 		sts = m_mfxAllocator.Alloc(m_mfxAllocator.pthis, &EncRequest,
 					   &m_mfxResponse);
 		MSDK_CHECK_RESULT(sts, MFX_ERR_NONE, sts);
@@ -752,7 +754,7 @@ mfxStatus QSV_Encoder_Internal::Encode(uint64_t ts, uint8_t *pDataY,
 	}
 
 	mfxFrameSurface1 *pSurface = m_pmfxSurfaces[nSurfIdx];
-	if (m_bUseD3D11 || m_bD3D9HACK) {
+	if (m_bUseTexAlloc) {
 		sts = m_mfxAllocator.Lock(m_mfxAllocator.pthis,
 					  pSurface->Data.MemId,
 					  &(pSurface->Data));
@@ -766,7 +768,7 @@ mfxStatus QSV_Encoder_Internal::Encode(uint64_t ts, uint8_t *pDataY,
 	MSDK_CHECK_RESULT(sts, MFX_ERR_NONE, sts);
 	pSurface->Data.TimeStamp = ts;
 
-	if (m_bUseD3D11 || m_bD3D9HACK) {
+	if (m_bUseTexAlloc) {
 		sts = m_mfxAllocator.Unlock(m_mfxAllocator.pthis,
 					    pSurface->Data.MemId,
 					    &(pSurface->Data));
@@ -831,9 +833,10 @@ mfxStatus QSV_Encoder_Internal::Encode_tex(uint64_t ts, uint32_t tex_handle,
 	mfxFrameSurface1 *pSurface = m_pmfxSurfaces[nSurfIdx];
 	//copy to default surface directly
 	pSurface->Data.TimeStamp = ts;
-	if (m_bUseD3D11 || m_bD3D9HACK) {
+	if (m_bUseTexAlloc) {
+		// mfxU64 isn't consistent with stdint, requiring a cast to be multi-platform.
 		sts = simple_copytex(m_mfxAllocator.pthis, pSurface->Data.MemId,
-				     tex_handle, lock_key, next_key);
+				     tex_handle, lock_key, (mfxU64 *)next_key);
 		MSDK_CHECK_RESULT(sts, MFX_ERR_NONE, sts);
 	}
 
@@ -888,12 +891,12 @@ mfxStatus QSV_Encoder_Internal::ClearData()
 		m_pmfxENC = NULL;
 	}
 
-	if (m_bUseD3D11 || m_bD3D9HACK)
+	if (m_bUseTexAlloc)
 		m_mfxAllocator.Free(m_mfxAllocator.pthis, &m_mfxResponse);
 
 	if (m_pmfxSurfaces) {
 		for (int i = 0; i < m_nSurfNum; i++) {
-			if (!m_bUseD3D11 && !m_bD3D9HACK)
+			if (!m_bUseTexAlloc)
 				delete m_pmfxSurfaces[i]->Data.Y;
 
 			delete m_pmfxSurfaces[i];
@@ -916,7 +919,7 @@ mfxStatus QSV_Encoder_Internal::ClearData()
 		g_numEncodersOpen--;
 	}
 
-	if ((m_bUseD3D11 || m_bD3D9HACK) && (g_numEncodersOpen <= 0)) {
+	if ((m_bUseTexAlloc) && (g_numEncodersOpen <= 0)) {
 		Release();
 		g_DX_Handle = NULL;
 	}

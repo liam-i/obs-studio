@@ -228,7 +228,8 @@ struct DShowInput {
 	}
 
 	inline DShowInput(obs_source_t *source_, obs_data_t *settings)
-		: source(source_), device(InitGraph::False)
+		: source(source_),
+		  device(InitGraph::False)
 	{
 		memset(&audio, 0, sizeof(audio));
 		memset(&frame, 0, sizeof(frame));
@@ -1026,13 +1027,16 @@ bool DShowInput::UpdateAudioConfig(obs_data_t *settings)
 
 	if (useCustomAudio) {
 		DeviceId id;
-		if (!DecodeDeviceId(id, audio_device_id.c_str()))
+		if (!DecodeDeviceId(id, audio_device_id.c_str())) {
+			obs_source_set_audio_active(source, false);
 			return false;
+		}
 
 		audioConfig.name = id.name;
 		audioConfig.path = id.path;
 
 	} else if (!deviceHasAudio) {
+		obs_source_set_audio_active(source, false);
 		return true;
 	}
 
@@ -1049,8 +1053,12 @@ bool DShowInput::UpdateAudioConfig(obs_data_t *settings)
 		(AudioMode)obs_data_get_int(settings, AUDIO_OUTPUT_MODE);
 
 	bool success = device.SetAudioConfig(&audioConfig);
-	if (!success)
+	if (!success) {
+		obs_source_set_audio_active(source, false);
 		return false;
+	}
+
+	obs_source_set_audio_active(source, true);
 
 	BPtr<char> name_utf8;
 	os_wcs_to_utf8_ptr(audioConfig.name.c_str(), audioConfig.name.size(),
@@ -1135,12 +1143,15 @@ DShowInput::GetColorRange(obs_data_t *settings) const
 
 inline bool DShowInput::Activate(obs_data_t *settings)
 {
-	if (!device.ResetGraph())
+	if (!device.ResetGraph()) {
+		obs_source_set_audio_active(source, false);
 		return false;
+	}
 
 	if (!UpdateVideoConfig(settings)) {
 		blog(LOG_WARNING, "%s: Video configuration failed",
 		     obs_source_get_name(source));
+		obs_source_set_audio_active(source, false);
 		return false;
 	}
 

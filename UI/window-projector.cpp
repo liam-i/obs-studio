@@ -16,7 +16,8 @@ static bool updatingMultiview = false, mouseSwitching, transitionOnDoubleClick;
 
 OBSProjector::OBSProjector(QWidget *widget, obs_source_t *source_, int monitor,
 			   ProjectorType type_)
-	: OBSQTDisplay(widget, Qt::Window), weakSource(OBSGetWeakRef(source_))
+	: OBSQTDisplay(widget, Qt::Window),
+	  weakSource(OBSGetWeakRef(source_))
 {
 	OBSSource source = GetSource();
 	if (source) {
@@ -227,6 +228,10 @@ void OBSProjector::mouseDoubleClickEvent(QMouseEvent *event)
 		return;
 
 	if (!transitionOnDoubleClick)
+		return;
+
+	// Only MultiView projectors handle double click
+	if (this->type != ProjectorType::Multiview)
 		return;
 
 	OBSBasic *main = (OBSBasic *)obs_frontend_get_main_window();

@@ -43,7 +43,9 @@ enum MissingFilesRole { EntryStateRole = Qt::UserRole, NewPathsToProcessRole };
 
 MissingFilesPathItemDelegate::MissingFilesPathItemDelegate(
 	bool isOutput, const QString &defaultPath)
-	: QStyledItemDelegate(), isOutput(isOutput), defaultPath(defaultPath)
+	: QStyledItemDelegate(),
+	  isOutput(isOutput),
+	  defaultPath(defaultPath)
 {
 }
 
@@ -163,6 +165,11 @@ void MissingFilesPathItemDelegate::handleBrowse(QWidget *container)
 		QString newPath = QFileDialog::getOpenFileName(
 			container, QTStr("MissingFiles.SelectFile"),
 			currentPath, nullptr);
+
+#ifdef __APPLE__
+		// TODO: Revisit when QTBUG-42661 is fixed
+		container->window()->raise();
+#endif
 
 		if (!newPath.isEmpty()) {
 			container->setProperty(PATH_LIST_PROP,

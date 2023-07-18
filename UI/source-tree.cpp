@@ -33,7 +33,8 @@ static inline OBSScene GetCurrentScene()
 /* ========================================================================= */
 
 SourceTreeItem::SourceTreeItem(SourceTree *tree_, OBSSceneItem sceneitem_)
-	: tree(tree_), sceneitem(sceneitem_)
+	: tree(tree_),
+	  sceneitem(sceneitem_)
 {
 	setAttribute(Qt::WA_TranslucentBackground);
 	setMouseTracking(true);
@@ -133,12 +134,13 @@ SourceTreeItem::SourceTreeItem(SourceTree *tree_, OBSSceneItem sceneitem_)
 		obs_source_t *scenesource = obs_scene_get_source(scene);
 		int64_t id = obs_sceneitem_get_id(sceneitem);
 		const char *name = obs_source_get_name(scenesource);
+		const char *uuid = obs_source_get_uuid(scenesource);
 		obs_source_t *source = obs_sceneitem_get_source(sceneitem);
 
-		auto undo_redo = [](const std::string &name, int64_t id,
+		auto undo_redo = [](const std::string &uuid, int64_t id,
 				    bool val) {
 			OBSSourceAutoRelease s =
-				obs_get_source_by_name(name.c_str());
+				obs_get_source_by_uuid(uuid.c_str());
 			obs_scene_t *sc = obs_group_or_scene_from_source(s);
 			obs_sceneitem_t *si =
 				obs_scene_find_sceneitem_by_id(sc, id);
@@ -154,7 +156,7 @@ SourceTreeItem::SourceTreeItem(SourceTree *tree_, OBSSceneItem sceneitem_)
 			str.arg(obs_source_get_name(source), name),
 			std::bind(undo_redo, std::placeholders::_1, id, !val),
 			std::bind(undo_redo, std::placeholders::_1, id, val),
-			name, name);
+			uuid, uuid);
 
 		SignalBlocker sourcesSignalBlocker(this);
 		obs_sceneitem_set_visible(sceneitem, val);
@@ -334,11 +336,7 @@ void SourceTreeItem::mouseDoubleClickEvent(QMouseEvent *event)
 	}
 }
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 void SourceTreeItem::enterEvent(QEnterEvent *event)
-#else
-void SourceTreeItem::enterEvent(QEvent *event)
-#endif
 {
 	QWidget::enterEvent(event);
 
@@ -452,32 +450,33 @@ void SourceTreeItem::ExitEditModeInternal(bool save)
 
 	SignalBlocker sourcesSignalBlocker(this);
 	std::string prevName(obs_source_get_name(source));
-	std::string scene_name =
-		obs_source_get_name(main->GetCurrentSceneSource());
-	auto undo = [scene_name, prevName, main](const std::string &data) {
+	std::string scene_uuid =
+		obs_source_get_uuid(main->GetCurrentSceneSource());
+	auto undo = [scene_uuid, prevName, main](const std::string &data) {
 		OBSSourceAutoRelease source =
-			obs_get_source_by_name(data.c_str());
+			obs_get_source_by_uuid(data.c_str());
 		obs_source_set_name(source, prevName.c_str());
 
 		OBSSourceAutoRelease scene_source =
-			obs_get_source_by_name(scene_name.c_str());
+			obs_get_source_by_uuid(scene_uuid.c_str());
 		main->SetCurrentScene(scene_source.Get(), true);
 	};
 
 	std::string editedName = newName;
 
-	auto redo = [scene_name, main, editedName](const std::string &data) {
+	auto redo = [scene_uuid, main, editedName](const std::string &data) {
 		OBSSourceAutoRelease source =
-			obs_get_source_by_name(data.c_str());
+			obs_get_source_by_uuid(data.c_str());
 		obs_source_set_name(source, editedName.c_str());
 
 		OBSSourceAutoRelease scene_source =
-			obs_get_source_by_name(scene_name.c_str());
+			obs_get_source_by_uuid(scene_uuid.c_str());
 		main->SetCurrentScene(scene_source.Get(), true);
 	};
 
+	const char *uuid = obs_source_get_uuid(source);
 	main->undo_s.add_action(QTStr("Undo.Rename").arg(newName.c_str()), undo,
-				redo, newName, prevName);
+				redo, uuid, uuid);
 
 	obs_source_set_name(source, newName.c_str());
 	label->setText(QT_UTF8(newName.c_str()));
@@ -641,6 +640,9 @@ void SourceTreeModel::OBSFrontendEvent(enum obs_frontend_event event, void *ptr)
 		stm->SceneChanged();
 		break;
 	case OBS_FRONTEND_EVENT_EXIT:
+		stm->Clear();
+		obs_frontend_remove_event_callback(OBSFrontendEvent, stm);
+		break;
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP:
 		stm->Clear();
 		break;
@@ -855,14 +857,10 @@ OBSSceneItem SourceTreeModel::Get(int idx)
 }
 
 SourceTreeModel::SourceTreeModel(SourceTree *st_)
-	: QAbstractListModel(st_), st(st_)
+	: QAbstractListModel(st_),
+	  st(st_)
 {
 	obs_frontend_add_event_callback(OBSFrontendEvent, this);
-}
-
-SourceTreeModel::~SourceTreeModel()
-{
-	obs_frontend_remove_event_callback(OBSFrontendEvent, this);
 }
 
 int SourceTreeModel::rowCount(const QModelIndex &parent) const
@@ -1184,14 +1182,7 @@ void SourceTree::dropEvent(QDropEvent *event)
 	QModelIndexList indices = selectedIndexes();
 
 	DropIndicatorPosition indicator = dropIndicatorPosition();
-	int row = indexAt(
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-			  event->position().toPoint()
-#else
-			  event->pos()
-#endif
-				  )
-			  .row();
+	int row = indexAt(event->position().toPoint()).row();
 	bool emptyDrop = row == -1;
 
 	if (emptyDrop) {
@@ -1525,7 +1516,7 @@ void SourceTree::NewGroupEdit(int row)
 				  "theoretically, it should be\nimpossible "
 				  "for this code to be reached. But if this "
 				  "code is reached,\nfeel free to laugh at "
-				  "Jim, because apparently it is, in fact, "
+				  "Lain, because apparently it is, in fact, "
 				  "actually\npossible for this code to be "
 				  "reached. But I mean, again, theoretically\n"
 				  "it should be impossible. So if you see "
